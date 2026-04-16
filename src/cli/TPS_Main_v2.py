@@ -3,20 +3,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import pandas as pd
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-if str(ROOT_DIR / "src") not in sys.path:
-    sys.path.append(str(ROOT_DIR / "src"))
+ROOT_DIR = Path(__file__).resolve().parents[3]
 
-from scripts.common.runtime_config import parse_args_with_config
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
+from .runtime_config import parse_args_with_config
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
+from user_parser.tps import compute_tps_scores
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,20 +44,7 @@ def run_all() -> None:
     print("=" * 70)
 
     print("\n[Step 1] CSV 데이터 기반 잠재력 점수(TPS) 산출 중...")
-    df = pd.read_csv(args.csv_path)
-
-    df["s_trust"] = (100.0 - (df["OVERDUE_CNT"] * 30.0) - (df["INST_CNT"] * 5.0)).clip(0, 100)
-    df["s_activity"] = (
-        df["TOTAL_SPENDING"].rank(pct=True) * 30
-        + df["SPENDING_COUNT"].rank(pct=True) * 40
-        + df["PAY_VISIT_CNT"].rank(pct=True) * 30
-    )
-    income_pct = df["EST_INCOME"].rank(pct=True) * 100.0
-    cb_pct = df["CB_SCORE"].rank(pct=True) * 100.0
-    tel_score = df["TEL_GRADE"] * 100.0
-    youth_bonus = df["AGE_GB"].apply(lambda x: 100.0 if x in ["20대", "30대"] else 0.0)
-    df["s_potential"] = income_pct * 0.2 + cb_pct * 0.2 + tel_score * 0.3 + youth_bonus * 0.3
-    df["tps_score"] = (df["s_trust"] * 0.4) + (df["s_activity"] * 0.3) + (df["s_potential"] * 0.3)
+    df = compute_tps_scores(pd.read_csv(args.csv_path))
 
     top_5 = df.sort_values("tps_score", ascending=False).head(5)
     print("\n>> TPS 상위 우량군 (Top 5):")

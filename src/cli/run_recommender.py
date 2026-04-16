@@ -4,9 +4,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
-from thin_filer.pipeline import to_json
+from .runtime_config import parse_args_with_config
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
+from common.pipeline import to_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help='Optional quarter filter, e.g. "2022Q2 2022Q3"',
     )
-    return p.parse_args()
+    return parse_args_with_config(p, section="run_recommender")
 
 
 def main() -> None:

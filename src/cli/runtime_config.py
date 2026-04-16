@@ -1,38 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import tomllib
 
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
-    try:
-        import yaml  # type: ignore
-    except Exception as exc:  # pragma: no cover
-        raise ImportError(
-            "YAML config requires PyYAML. Install with `pip install pyyaml`."
-        ) from exc
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"Config root must be a mapping: {path}")
-    return data
-
-
 def load_config(path: Path) -> Dict[str, Any]:
     suffix = path.suffix.lower()
     if suffix == ".toml":
         return tomllib.loads(path.read_text(encoding="utf-8"))
-    if suffix in {".yaml", ".yml"}:
-        return _load_yaml(path)
-    if suffix == ".json":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError(f"Config root must be a mapping: {path}")
-        return data
-    raise ValueError(f"Unsupported config extension: {path.suffix}")
+    raise ValueError(f"Unsupported config extension: {path.suffix} (use .toml)")
 
 
 def _coerce_value(action: argparse.Action, value: Any) -> Any:
@@ -73,5 +52,5 @@ def parse_args_with_config(
                 defaults[k] = _coerce_value(action_map[k], v)
 
     parser.set_defaults(**defaults)
-    parser.add_argument("--config", type=Path, default=pre_args.config, help="Path to TOML/YAML/JSON run config")
+    parser.add_argument("--config", type=Path, default=pre_args.config, help="Path to TOML run config")
     return parser.parse_args(argv)

@@ -1,15 +1,7 @@
-import sys
-from pathlib import Path
-
-# 현재 파일 위치: scripts/recommender/demo_new_user_v2.py
-# 루트 위치: scripts/recommender/ 의 2단계 위 폴더
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR / "src") not in sys.path:
-    sys.path.append(str(ROOT_DIR / "src"))
-
 import json
-from thin_filer.recommender import ThinFilerRecommender
-from thin_filer.pipeline_config import RecommenderConfig
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
+from user_parser.tps import parse_new_user
 
 def demo():
     print("\n" + "="*60)
@@ -41,7 +33,7 @@ def demo():
 
     # 3. 추천 실행 (새로 만든 recommend_new_user 인터페이스 활용)
     print("\n추천 엔진 가동 중 (TPS v2.0 분석 포함)...")
-    result = rec.recommend_new_user(new_user, k=5)
+    result = rec.recommend_new_user(parse_new_user(new_user), k=5)
 
     # 4. 결과 출력
     print("\n" + "-"*60)

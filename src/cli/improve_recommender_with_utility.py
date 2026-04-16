@@ -4,17 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-if str(ROOT_DIR / "src") not in sys.path:
-    sys.path.append(str(ROOT_DIR / "src"))
 
 import matplotlib
 matplotlib.use("Agg")
@@ -24,10 +17,10 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.pipeline_helpers import _ndcg_at_k
-from thin_filer.recommender import ThinFilerRecommender
-from scripts.common.runtime_config import parse_args_with_config
+from common.config import RecommenderConfig
+from common.helpers import _ndcg_at_k
+from recommender.engine import ThinFilerRecommender
+from .runtime_config import parse_args_with_config
 
 try:
     from lightgbm import LGBMRanker

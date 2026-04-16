@@ -4,6 +4,24 @@ sample_users = 120
 max_train_users = 80
 max_eval_users = 40
 
+[run_recommender]
+family = "deposit"
+fit = true
+top_k = 5
+
+[evaluate]
+family = "deposit"
+fit = true
+ks = [5, 10]
+
+[explain_recommender]
+family = "deposit"
+fit = true
+top_k = 5
+use_llm_renderer = false
+llm_model = "gpt-5-mini"
+no_template_fallback = false
+
 [improve_recommender_with_utility]
 family = "deposit"
 candidate_max = 80

@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Dict
 
-from .pipeline_config import RecommenderConfig
-from .pipeline_helpers import (
+from common.config import RecommenderConfig
+from common.helpers import (
     MISSING_SENTINELS,
     PAIR_MATCH_FEATURES,
     TABLE09_NEEDED_COLS,
@@ -23,7 +23,7 @@ from .pipeline_helpers import (
     _to_numeric,
     _ym_to_quarter,
 )
-from .recommender import DepositRecommender, FundRecommender, ThinFilerRecommender
+from recommender.engine import DepositRecommender, FundRecommender, ThinFilerRecommender
 
 
 # Backward-compatible public API

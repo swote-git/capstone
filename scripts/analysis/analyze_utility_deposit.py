@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
 
 
 def set_korean_font() -> str:

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 
-from .explainer_common import (
+from .common import (
     FEATURE_LABELS,
     FORBIDDEN_PATTERNS,
     ReasonSignal,
@@ -16,13 +16,13 @@ from .explainer_common import (
     risk_label,
     warnings_from_facts,
 )
-from .explainer_reasoning import (
+from .reasoning import (
     build_explanation_object,
     extract_reasons,
     local_contributions,
     retrieve_product_facts,
 )
-from .explainer_render_verify import (
+from .render_verify import (
     check_fact_consistency,
     contains_forbidden_claims,
     hallucination_rate,

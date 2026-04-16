@@ -27,71 +27,86 @@ pip install -r requirements.txt
 
 ## Run
 
+Unified entrypoint from project root:
+
+```bash
+python3 main.py recommend --sample-users 20 --top-k 5
+python3 main.py explain --fit --sample-users 200 --top-k 5
+python3 main.py evaluate --fit --sample-users 1200 --max-train-users 800 --max-eval-users 300 --ks 5 10
+```
+
 Inference demo (baseline if model not trained):
 
 ```bash
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --sample-users 20 --top-k 5
+PYTHONPATH=src python3 -m cli.run_recommender --sample-users 20 --top-k 5
 ```
 
 Deposit-only recommender:
 
 ```bash
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --sample-users 20 --top-k 5 --family deposit
+PYTHONPATH=src python3 -m cli.run_recommender --sample-users 20 --top-k 5 --family deposit
 ```
 
 Fund-only recommender:
 
 ```bash
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --sample-users 20 --top-k 5 --family fund
+PYTHONPATH=src python3 -m cli.run_recommender --sample-users 20 --top-k 5 --family fund
 ```
 
 Train + inference:
 
 ```bash
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --fit --max-train-users 1000 --sample-users 200 --top-k 5
+PYTHONPATH=src python3 -m cli.run_recommender --fit --max-train-users 1000 --sample-users 200 --top-k 5
 ```
 
 Grounded explainer run (strict structured explanation + verifier):
 
 ```bash
-PYTHONPATH=src python3 scripts/recommender/explain_recommender.py --fit --sample-users 200 --max-train-users 800 --top-k 5
+PYTHONPATH=src python3 -m cli.explain_recommender --fit --sample-users 200 --max-train-users 800 --top-k 5
 ```
 
 Grounded explainer with OpenAI LLM renderer (object-grounded verbalization):
 
 ```bash
 export OPENAI_API_KEY=your_api_key
-PYTHONPATH=src python3 scripts/recommender/explain_recommender.py --fit --sample-users 200 --top-k 5 --use-llm-renderer --llm-model gpt-5-mini
+PYTHONPATH=src python3 -m cli.explain_recommender --fit --sample-users 200 --top-k 5 --use-llm-renderer --llm-model gpt-5-mini
 ```
 
 Explainer batch evaluation (RC/HR/pass rate):
 
 ```bash
-PYTHONPATH=src python3 scripts/evaluation/evaluate_explainer.py --fit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5
+PYTHONPATH=src python3 -m cli.evaluate_explainer --fit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5
 ```
 
 Evaluation report (baseline vs ranker):
 
 ```bash
-PYTHONPATH=src python3 scripts/evaluation/evaluate.py --sample-users 1000 --max-eval-users 300 --ks 5 10
+PYTHONPATH=src python3 -m cli.evaluate --sample-users 1000 --max-eval-users 300 --ks 5 10
 ```
 
 Train then evaluate:
 
 ```bash
-PYTHONPATH=src python3 scripts/evaluation/evaluate.py --fit --sample-users 1200 --max-train-users 800 --max-eval-users 300 --ks 5 10
+PYTHONPATH=src python3 -m cli.evaluate --fit --sample-users 1200 --max-train-users 800 --max-eval-users 300 --ks 5 10
 ```
 
 Quarter filter example:
 
 ```bash
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --as-of-dates 2022Q2 2022Q3 --sample-users 100
+PYTHONPATH=src python3 -m cli.run_recommender --as-of-dates 2022Q2 2022Q3 --sample-users 100
 ```
 
 Join integrity audit (recommended before training):
 
 ```bash
 PYTHONPATH=src python3 scripts/analysis/audit_join.py --sample-users 5000 --sample-size 10000
+```
+
+Run with single root config (`run_config.toml`):
+
+```bash
+PYTHONPATH=src python3 -m cli.improve_recommender_with_utility --config run_config.toml
+PYTHONPATH=src python3 -m cli.evaluate_explainer --config run_config.toml
 ```
 
 ## Execution Guideline (Recommended Order)
@@ -114,23 +129,23 @@ If `cb_join_rate` is near `0`, treat table `09` as effectively unavailable in in
 3. Run family-specific recommender (recommended)
 ```bash
 # Deposit-only
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --fit --family deposit --sample-users 200 --max-train-users 800 --top-k 5
+PYTHONPATH=src python3 -m cli.run_recommender --fit --family deposit --sample-users 200 --max-train-users 800 --top-k 5
 
 # Fund-only
-PYTHONPATH=src python3 scripts/recommender/run_recommender.py --fit --family fund --sample-users 200 --max-train-users 800 --top-k 5
+PYTHONPATH=src python3 -m cli.run_recommender --fit --family fund --sample-users 200 --max-train-users 800 --top-k 5
 ```
 
 4. Run family-specific improved E2E report
 ```bash
 # Deposit v2
-PYTHONPATH=src python3 scripts/recommender/improve_recommender_with_utility.py \
+PYTHONPATH=src python3 -m cli.improve_recommender_with_utility \
   --family deposit --sample-users 120 --max-train-users 80 --max-eval-users 40 \
   --candidate-max 80 --ks 5 10 \
   --out-dir reports/e2e/improved_recommender_deposit_v2 \
   --out-json reports/raw/e2e_improved_recommender_deposit_v2.json
 
 # Fund v2
-PYTHONPATH=src python3 scripts/recommender/improve_recommender_with_utility.py \
+PYTHONPATH=src python3 -m cli.improve_recommender_with_utility \
   --family fund --sample-users 120 --max-train-users 80 --max-eval-users 40 \
   --candidate-max 80 --ks 5 10 \
   --out-dir reports/e2e/improved_recommender_fund_v2 \
@@ -140,18 +155,18 @@ PYTHONPATH=src python3 scripts/recommender/improve_recommender_with_utility.py \
 5. Run explanation pipeline (template or LLM)
 ```bash
 # Template renderer
-PYTHONPATH=src python3 scripts/recommender/explain_recommender.py --fit --family deposit --sample-users 200 --top-k 5
+PYTHONPATH=src python3 -m cli.explain_recommender --fit --family deposit --sample-users 200 --top-k 5
 
 # OpenAI LLM renderer (grounded verbalization only)
 export OPENAI_API_KEY=your_api_key
-PYTHONPATH=src python3 scripts/recommender/explain_recommender.py \
+PYTHONPATH=src python3 -m cli.explain_recommender \
   --fit --family deposit --sample-users 200 --top-k 5 \
   --use-llm-renderer --llm-model gpt-5-mini
 ```
 
 6. Validate explainer metrics
 ```bash
-PYTHONPATH=src python3 scripts/evaluation/evaluate_explainer.py \
+PYTHONPATH=src python3 -m cli.evaluate_explainer \
   --fit --family deposit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5
 ```
 

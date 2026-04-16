@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Sequence
 
-from .explainer_common import FORBIDDEN_PATTERNS, expected_summary_line
+from .common import FORBIDDEN_PATTERNS, expected_summary_line
 
 
 def render_explanation(explanation_object: Dict[str, Any]) -> str:

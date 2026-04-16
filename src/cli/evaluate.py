@@ -5,8 +5,10 @@ import argparse
 import json
 from pathlib import Path
 
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
+from .runtime_config import parse_args_with_config
+from common.config import RecommenderConfig
+from evaluate.recommender_eval import build_recommender_eval_report
+from recommender.engine import ThinFilerRecommender
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,18 +21,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--family", choices=["all", "deposit", "fund"], default="all")
     p.add_argument("--ks", nargs="+", type=int, default=[5, 10])
     p.add_argument("--as-of-dates", nargs="*", default=None)
-    return p.parse_args()
-
-
-def _split_users(snapshots, user_col: str, train_ratio: float = 0.8):
-    users = snapshots[user_col].drop_duplicates().sample(frac=1.0, random_state=42)
-    cutoff = max(1, int(len(users) * train_ratio))
-    train_users = set(users.iloc[:cutoff])
-    train_df = snapshots[snapshots[user_col].isin(train_users)].copy()
-    eval_df = snapshots[~snapshots[user_col].isin(train_users)].copy()
-    if eval_df.empty:
-        eval_df = train_df.copy()
-    return train_df, eval_df
+    return parse_args_with_config(p, section="evaluate")
 
 
 def main() -> None:
@@ -44,21 +35,27 @@ def main() -> None:
     )
     rec.load_products()
 
-    train_df, eval_df = _split_users(snapshots, user_col=cfg.user_key_11)
+    report = build_recommender_eval_report(
+        rec=rec,
+        snapshots=snapshots,
+        user_key=cfg.user_key_11,
+        ks=args.ks,
+        max_eval_users=args.max_eval_users,
+    )
+    train_df = report.pop("train_df")
+    report.pop("eval_df", None)
 
     if args.fit:
         rec.fit(snapshots=train_df, max_users=args.max_train_users)
-
-    report = {
-        "snapshot_quality": rec.snapshot_quality_report(snapshots),
-        "split": {
-            "train_rows": int(len(train_df)),
-            "eval_rows": int(len(eval_df)),
-            "train_users": int(train_df[cfg.user_key_11].nunique()),
-            "eval_users": int(eval_df[cfg.user_key_11].nunique()),
-        },
-        "evaluation": rec.evaluate(eval_df, ks=args.ks, max_users=args.max_eval_users),
-    }
+        report = build_recommender_eval_report(
+            rec=rec,
+            snapshots=snapshots,
+            user_key=cfg.user_key_11,
+            ks=args.ks,
+            max_eval_users=args.max_eval_users,
+        )
+        report.pop("train_df", None)
+        report.pop("eval_df", None)
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

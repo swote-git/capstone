@@ -4,10 +4,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from thin_filer.llm_renderer import OpenAILLMRenderer
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
-from thin_filer.pipeline import to_json
+from .runtime_config import parse_args_with_config
+from explainer.llm_renderer import OpenAILLMRenderer
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
+from common.pipeline import to_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not fallback to deterministic template when LLM output fails verifier",
     )
-    return p.parse_args()
+    return parse_args_with_config(p, section="explain_recommender")
 
 
 def main() -> None:

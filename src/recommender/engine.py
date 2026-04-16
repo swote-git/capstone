@@ -8,8 +8,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .pipeline_config import RecommenderConfig
-from .pipeline_helpers import (
+from common.config import RecommenderConfig
+from common.helpers import (
     PAIR_MATCH_FEATURES,
     TABLE09_NEEDED_COLS,
     TABLE11_NEEDED_COLS,
@@ -764,7 +764,7 @@ class ThinFilerRecommender:
         return [self.recommend(row, k=k) for _, row in snapshots.iterrows()]
 
     def explain_recommendation(self, user_snapshot: pd.Series, k: Optional[int] = None) -> Dict[str, object]:
-        from thin_filer.explainer import GroundedExplainer
+        from explainer.service import GroundedExplainer
 
         k = k or self.config.top_k
         explainer = GroundedExplainer(self)
@@ -777,7 +777,7 @@ class ThinFilerRecommender:
         llm_renderer: Optional[object] = None,
         fallback_to_template_on_verify_fail: bool = True,
     ) -> Dict[str, object]:
-        from thin_filer.explainer import GroundedExplainer
+        from explainer.service import GroundedExplainer
 
         k = k or self.config.top_k
         explainer = GroundedExplainer(

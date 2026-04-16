@@ -5,8 +5,8 @@ import argparse
 import json
 from pathlib import Path
 
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
 
 
 def parse_args() -> argparse.Namespace:

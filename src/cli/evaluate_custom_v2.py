@@ -2,20 +2,14 @@ import argparse
 import json
 import pandas as pd
 import numpy as np
-import sys
 from pathlib import Path
 
-# 현재 파일 위치: scripts/evaluation/evaluate_custom_v2.py
-# 루트 위치: scripts/evaluation/ 의 2단계 위 폴더
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-if str(ROOT_DIR / "src") not in sys.path:
-    sys.path.append(str(ROOT_DIR / "src"))
+ROOT_DIR = Path(__file__).resolve().parents[3]
 
-from scripts.common.runtime_config import parse_args_with_config
-from thin_filer.pipeline_config import RecommenderConfig
-from thin_filer.recommender import ThinFilerRecommender
+from .runtime_config import parse_args_with_config
+from common.config import RecommenderConfig
+from recommender.engine import ThinFilerRecommender
+from user_parser.tps import parse_custom_user_frame
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -31,61 +25,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # 1. 원본 데이터 로드
     print(f"Loading custom CSV: {args.csv_path}")
-    df = pd.read_csv(args.csv_path, encoding="utf-8")
-    
-    # [수정] 모든 숫자형 컬럼의 NaN을 0으로 미리 채움 (에러 방지 핵심)
-    for col in df.columns:
-        if col != "CUST_ID":
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    # 2. 고도화된 컬럼 매핑 및 TPS 기반 성향 도출
-    df["user_id"] = df["CUST_ID"]
-
-    # [수정] AGE_GB 대신 데이터에 있는 AGE를 직접 사용
-    if "AGE" in df.columns:
-        df["AGE"] = pd.to_numeric(df["AGE"], errors='coerce').fillna(30)
-    else:
-        df["AGE"] = 30
-
-    # TPS 지표 추출 (tps_final_data.csv의 컬럼명에 맞춤)
-    # 신뢰도 관련: CB_SCORE, OVERDUE_CNT, INST_CNT_RT
-    # 활동성 관련: TOTAL_SPENDING, SPENDING_COUNT, PAY_VISIT_CNT
-    # 잠재력 관련: AGE, EST_INCOME, TEL_GRADE
-
-    s_trust = df["s_trust"] if "s_trust" in df.columns else pd.Series(50.0, index=df.index)
-    s_activity = df["s_activity"] if "s_activity" in df.columns else pd.Series(50.0, index=df.index)
-    s_potential = df["s_potential"] if "s_potential" in df.columns else pd.Series(50.0, index=df.index)
-    
-    # [수정] s_potential을 100으로 나누어 정규화 (0~100 -> 0~1)
-    # 이제 유저마다 risk_tol이 0.5, 1.2, 2.8 등으로 다양해집니다!
-    df["risk_tol"] = (df["CB_SCORE"] / 1000 * 1.5 + (s_potential / 100) * 1.5).clip(0, 3)
-    
-    df["liquidity_need"] = (2.0 - (s_trust / 100 * 1.5)).clip(0, 2)
-    # 기타 지표들
-    df["horizon_pref"] = 1.0
-    df["complexity_tol"] = ((s_trust / 100) * 2.0).clip(0, 2)
-    # [수정] fillna(0)를 추가하여 NaN 에러 방지
-    df["amount_bin"] = (df["EST_INCOME"].fillna(0) / 10000000).astype(int).clip(0, 3)
-    df["investment_possible"] = 1.0
-
-    df["digital_behavior_freq"] = (s_activity / 100).clip(0, 1)
-    df["credit_depth"] = (df["CB_SCORE"] / 1000).clip(0, 1)
-    df["credit_recency"] = 0.8
-    df["telecom_payment_consistency"] = 0.9
-    df["card_usage_stability"] = (s_trust / 100).clip(0, 1)
-    df["spending_vs_balance_ratio"] = 0.5
-    
-    df["C1M210000"] = df["CB_SCORE"]
-    df["CD_USE_AMT"] = df["TOTAL_SPENDING"]
-    df["TOT_ASST"] = df["EST_INCOME"]
-    df["R3M_MBR_USE_CNT"] = df["SPENDING_COUNT"]
-    df["B1Y_MOB_OS"] = df["TEL_GRADE"]
-    
-    df["anchor_ym"] = 202212
-    df["as_of_date"] = "2022Q4"
-    df["STDT"] = 202212
+    df = parse_custom_user_frame(pd.read_csv(args.csv_path, encoding="utf-8"))
     
     # 3. 데이터 분할 및 학습
     users = df["user_id"].unique()
