@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from pathlib import Path
 
@@ -9,6 +10,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib
 matplotlib.use("Agg")
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_hex
@@ -23,6 +25,8 @@ def set_korean_font() -> str:
     available = {f.name for f in fm.fontManager.ttflist}
     chosen = next((c for c in candidates if c in available), "DejaVu Sans")
     plt.rcParams["font.family"] = chosen
+    plt.rcParams["font.sans-serif"] = [chosen, "DejaVu Sans"]
+    plt.rcParams["mathtext.fontset"] = "dejavusans"
     plt.rcParams["axes.unicode_minus"] = False
     return chosen
 

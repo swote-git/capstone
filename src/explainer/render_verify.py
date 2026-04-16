@@ -17,18 +17,18 @@ def render_explanation(explanation_object: Dict[str, Any]) -> str:
     warning_lines = "\n".join(f"- {w}" for w in warnings)
 
     summary = (
-        f"- Recommended {product['family']} with {product['risk']} risk and {product['liquidity']} liquidity "
-        f"for a user with {user_summary['risk_preference']} risk preference and {user_summary['liquidity_need']} liquidity need."
+        f"- {product['family']} 상품은 위험 수준 {product['risk']}, 유동성 {product['liquidity']} 특성을 가지며, "
+        f"위험 선호가 {user_summary['risk_preference']}이고 유동성 필요가 {user_summary['liquidity_need']}인 사용자에게 적합합니다."
     )
 
     return (
-        "[Reason]\n"
+        "[추천 이유]\n"
         f"{reason_lines}\n\n"
-        "[Warning]\n"
+        "[유의사항]\n"
         f"{warning_lines}\n\n"
-        "[Comparison]\n"
-        f"- Compared with {comparison['alternative']}: {comparison['difference']}\n\n"
-        "[Simple Summary]\n"
+        "[대안 비교]\n"
+        f"- 대안 {comparison['alternative']} 대비: {comparison['difference']}\n\n"
+        "[한줄 요약]\n"
         f"{summary}"
     )
 
@@ -63,7 +63,7 @@ def hallucination_rate(rendered_text: str, explanation_object: Dict[str, Any]) -
     allowed = set(explanation_object["model_reasons"])
     allowed.update(explanation_object["warnings"])
     allowed.add(
-        f"Compared with {explanation_object['comparison']['alternative']}: {explanation_object['comparison']['difference']}"
+        f"대안 {explanation_object['comparison']['alternative']} 대비: {explanation_object['comparison']['difference']}"
     )
     allowed.add(expected_summary_line(explanation_object))
 
