@@ -19,6 +19,9 @@
   -> [Explanation Object]
   -> [Renderer (Template/OpenAI)]
   -> [Verifier]
+  -> [User Simulator (w/o explanation vs w/ explanation)]
+  -> [Answer Evaluator]
+  -> [6 Metrics: personalization, grounding, clarity, compliance, UG, MR]
 ```
 
 ## 3. Source Layout (src)
@@ -42,6 +45,7 @@ src/
   evaluate/
     recommender_eval.py
     explainer_eval.py
+    explainer_understanding_eval.py
 
   user_parser/
     tps.py
@@ -81,11 +85,19 @@ PYTHONPATH=src python3 -m cli.improve_recommender_with_utility --config run_conf
 ## 6. Layering Rules
 - `recommender/`: ranking/modeling only
 - `explainer/`: explanation pipeline + verification only
-- `evaluate/`: experiment/evaluation aggregation only
+- `evaluate/`: experiment/evaluation aggregation + understanding-gain evaluation
 - `user_parser/`: external user input / CSV parsing only
 - `cli/`: orchestration-only thin entry layer
 
-## 7. Key Refactor Outcomes
+## 7. Explanation Evaluation Split
+- Quality layer:
+  - `reason_coverage_rc`, `hallucination_rate_hr`, `fact_consistency_rate`, `verification_pass_rate`
+  - `personalization`, `product_grounding`, `terminology_clarity`, `compliance`
+- Effect layer:
+  - `understanding_gain (UG)` = score(with explanation) - score(without explanation)
+  - `misinterpretation_rate (MR)` = misinterpretations / total questions
+
+## 8. Key Refactor Outcomes
 - Removed `src/thin_filer` depth and reorganized by domain
 - Kept `scripts/` for one-off analysis/visualization only
 - Added root `main.py` as unified entrypoint

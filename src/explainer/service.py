@@ -65,12 +65,17 @@ class GroundedExplainer:
             rendered = self.render_explanation(explanation_object)
             verification = self.verify(rendered, explanation_object, product_facts)
             render_source = "llm" if self.llm_renderer is not None else "template"
+            llm_intermediate: Optional[Dict[str, Any]] = None
 
             if (
                 self.llm_renderer is not None
                 and self.fallback_to_template_on_verify_fail
                 and not bool(verification.get("passed", False))
             ):
+                llm_intermediate = {
+                    "llm_rendered_explanation": rendered,
+                    "llm_verification": verification,
+                }
                 rendered = self.render_explanation_template(explanation_object)
                 verification = self.verify(rendered, explanation_object, product_facts)
                 render_source = "template_fallback"
@@ -85,6 +90,7 @@ class GroundedExplainer:
                     "rendered_explanation": rendered,
                     "verification": verification,
                     "render_source": render_source,
+                    "llm_intermediate": llm_intermediate,
                 }
             )
 

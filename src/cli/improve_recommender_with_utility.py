@@ -151,6 +151,7 @@ def build_proxy_label_independent(pair: pd.DataFrame) -> pd.Series:
     digital = clip01(pd.to_numeric(pair.get("digital_match", 0), errors="coerce").fillna(0))
     horizon = clip01(pd.to_numeric(pair.get("horizon_match", 0), errors="coerce").fillna(0))
     family = clip01(pd.to_numeric(pair.get("family_match", 0), errors="coerce").fillna(0))
+    risk_match = clip01(pd.to_numeric(pair.get("risk_match", 0), errors="coerce").fillna(0))
     complexity = clip01(1.0 - pd.to_numeric(pair.get("complexity", 0), errors="coerce").fillna(0) / 2.0)
     liquidity = clip01(pd.to_numeric(pair.get("liquidity_match", 0), errors="coerce").fillna(0))
     low_risk_penalty = (
@@ -181,7 +182,6 @@ def build_proxy_label_independent(pair: pd.DataFrame) -> pd.Series:
     # - deposit: keep strict amount feasibility gate
     # - fund: do not collapse by amount_feasibility (often non-informative for funds)
     #         use risk compatibility + family consistency as realizability gate.
-    risk_match = clip01(pd.to_numeric(pair.get("risk_match", 0), errors="coerce").fillna(0))
     fund_gate = ((risk_match >= 0.35) & (family >= 0.5)).astype(float)
     gate = np.where(is_deposit, (feas > 0).astype(float), fund_gate)
     score = score.where(gate > 0, 0.0)

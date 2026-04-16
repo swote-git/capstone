@@ -7,6 +7,10 @@ from pathlib import Path
 
 from .runtime_config import parse_args_with_config
 from evaluate.explainer_eval import evaluate_explainer_batch, sample_users
+from evaluate.explainer_understanding_eval import (
+    ExplainerUnderstandingEvaluator,
+    export_jsonl,
+)
 from explainer.service import GroundedExplainer
 from explainer.llm_renderer import OpenAILLMRenderer
 from common.config import RecommenderConfig
@@ -25,7 +29,46 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--as-of-dates", nargs="*", default=None)
     p.add_argument("--use-llm-renderer", action="store_true")
     p.add_argument("--llm-model", type=str, default="gpt-5-mini")
+    p.add_argument(
+        "--llm-prompt-path",
+        type=Path,
+        default=Path("src/explainer/explain.txt"),
+        help="Path to LLM system prompt text file",
+    )
     p.add_argument("--no-template-fallback", action="store_true")
+    p.add_argument(
+        "--enable-understanding-eval",
+        action="store_true",
+        help="Enable user-simulator/evaluator based understanding assessment",
+    )
+    p.add_argument(
+        "--max-understanding-samples",
+        type=int,
+        default=200,
+        help="Maximum recommendation items to run understanding evaluation on",
+    )
+    p.add_argument("--use-llm-user-simulator", action="store_true")
+    p.add_argument("--use-llm-evaluator", action="store_true")
+    p.add_argument("--simulator-model", type=str, default="gpt-5-mini")
+    p.add_argument("--evaluator-model", type=str, default="gpt-5-mini")
+    p.add_argument(
+        "--simulator-prompt-path",
+        type=Path,
+        default=Path("src/explainer/simulator.txt"),
+        help="Path to user simulator system prompt",
+    )
+    p.add_argument(
+        "--evaluator-prompt-path",
+        type=Path,
+        default=Path("src/explainer/evaluator.txt"),
+        help="Path to evaluator system prompt",
+    )
+    p.add_argument(
+        "--understanding-log-jsonl",
+        type=Path,
+        default=Path("reports/e2e/explainer_understanding_logs.jsonl"),
+        help="JSONL path for per-item understanding evaluation logs",
+    )
     return parse_args_with_config(p, section="evaluate_explainer")
 
 
@@ -47,14 +90,41 @@ def main() -> None:
         random_state=cfg.random_state,
     )
 
-    llm_renderer = OpenAILLMRenderer(model=args.llm_model) if args.use_llm_renderer else None
+    llm_renderer = (
+        OpenAILLMRenderer(model=args.llm_model, prompt_path=args.llm_prompt_path)
+        if args.use_llm_renderer
+        else None
+    )
     explainer = GroundedExplainer(
         rec,
         llm_renderer=llm_renderer,
         fallback_to_template_on_verify_fail=not args.no_template_fallback,
     )
 
-    batch = evaluate_explainer_batch(explainer=explainer, eval_snapshots=eval_snapshots, top_k=args.top_k)
+    understanding_evaluator = None
+    if args.enable_understanding_eval:
+        understanding_evaluator = ExplainerUnderstandingEvaluator(
+            use_llm_user_simulator=bool(args.use_llm_user_simulator),
+            use_llm_evaluator=bool(args.use_llm_evaluator),
+            simulator_model=str(args.simulator_model),
+            evaluator_model=str(args.evaluator_model),
+            simulator_prompt_path=args.simulator_prompt_path,
+            evaluator_prompt_path=args.evaluator_prompt_path,
+        )
+
+    batch = evaluate_explainer_batch(
+        explainer=explainer,
+        eval_snapshots=eval_snapshots,
+        top_k=args.top_k,
+        understanding_evaluator=understanding_evaluator,
+        max_understanding_samples=int(args.max_understanding_samples),
+    )
+
+    understanding_eval = batch.get("understanding_eval", {})
+    if args.enable_understanding_eval:
+        records = understanding_eval.get("records", [])
+        if isinstance(records, list) and records:
+            export_jsonl(records, args.understanding_log_jsonl)
 
     report = {
         "config": {
@@ -65,7 +135,17 @@ def main() -> None:
             "top_k": int(args.top_k),
             "use_llm_renderer": bool(args.use_llm_renderer),
             "llm_model": str(args.llm_model),
+            "llm_prompt_path": str(args.llm_prompt_path),
             "template_fallback": bool(not args.no_template_fallback),
+            "enable_understanding_eval": bool(args.enable_understanding_eval),
+            "max_understanding_samples": int(args.max_understanding_samples),
+            "use_llm_user_simulator": bool(args.use_llm_user_simulator),
+            "use_llm_evaluator": bool(args.use_llm_evaluator),
+            "simulator_model": str(args.simulator_model),
+            "evaluator_model": str(args.evaluator_model),
+            "simulator_prompt_path": str(args.simulator_prompt_path),
+            "evaluator_prompt_path": str(args.evaluator_prompt_path),
+            "understanding_log_jsonl": str(args.understanding_log_jsonl),
         },
         "snapshot_quality": rec.snapshot_quality_report(snapshots),
         "coverage": {
@@ -76,6 +156,17 @@ def main() -> None:
         "reason_feature_distribution_top10": batch["reason_feature_distribution_top10"],
         "reason_pattern_distribution_top10": batch["reason_pattern_distribution_top10"],
         "failed_examples": batch["failed_examples"],
+        "understanding_eval": {
+            "enabled": bool(understanding_eval.get("enabled", False)),
+            "evaluated_count": int(understanding_eval.get("evaluated_count", 0)),
+            "metrics": understanding_eval.get("metrics", {}),
+            "sample_records": understanding_eval.get("sample_records", []),
+            "log_path": (
+                str(args.understanding_log_jsonl)
+                if args.enable_understanding_eval and int(understanding_eval.get("evaluated_count", 0)) > 0
+                else None
+            ),
+        },
         "warnings": [],
     }
 
@@ -86,6 +177,11 @@ def main() -> None:
     if report["metrics"]["reason_pattern_diversity"] < 0.05:
         report["warnings"].append(
             "Very low reason-pattern diversity; explanation quality may be degenerate despite perfect verifier pass."
+        )
+    ug = float(report["understanding_eval"]["metrics"].get("understanding_gain", 0.0) or 0.0)
+    if report["understanding_eval"]["enabled"] and ug <= 0:
+        report["warnings"].append(
+            "Understanding gain is non-positive; explanation may sound fluent but not improve user comprehension."
         )
 
     print(json.dumps(report, ensure_ascii=False, indent=2))

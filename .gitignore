@@ -10,3 +10,5 @@ logs/
 *.json
 *.xlsx
 .codex
+.env
+.env.*

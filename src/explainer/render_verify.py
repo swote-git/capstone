@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Sequence
 
-from .common import FORBIDDEN_PATTERNS, expected_summary_line
+from .common import FORBIDDEN_PATTERNS, expected_product_info_lines, expected_summary_line
 
 
 def render_explanation(explanation_object: Dict[str, Any]) -> str:
@@ -12,7 +12,9 @@ def render_explanation(explanation_object: Dict[str, Any]) -> str:
     comparison = explanation_object["comparison"]
     user_summary = explanation_object["user_summary"]
     product = explanation_object["recommended_product"]
+    product_lines = expected_product_info_lines(explanation_object)
 
+    info_lines = "\n".join(f"- {r}" for r in product_lines)
     reason_lines = "\n".join(f"- {r}" for r in reasons)
     warning_lines = "\n".join(f"- {w}" for w in warnings)
 
@@ -22,6 +24,8 @@ def render_explanation(explanation_object: Dict[str, Any]) -> str:
     )
 
     return (
+        "[상품 정보 요약]\n"
+        f"{info_lines}\n\n"
         "[추천 이유]\n"
         f"{reason_lines}\n\n"
         "[유의사항]\n"
@@ -66,6 +70,7 @@ def hallucination_rate(rendered_text: str, explanation_object: Dict[str, Any]) -
         f"대안 {explanation_object['comparison']['alternative']} 대비: {explanation_object['comparison']['difference']}"
     )
     allowed.add(expected_summary_line(explanation_object))
+    allowed.update(expected_product_info_lines(explanation_object))
 
     unknown = sum(1 for claim in lines if claim not in allowed)
     return unknown / len(lines)

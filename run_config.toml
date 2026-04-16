@@ -20,6 +20,7 @@ fit = true
 top_k = 5
 use_llm_renderer = false
 llm_model = "gpt-5-mini"
+llm_prompt_path = "src/explainer/explain.txt"
 no_template_fallback = false
 
 [improve_recommender_with_utility]
@@ -44,4 +45,14 @@ top_k = 5
 fit = true
 use_llm_renderer = false
 llm_model = "gpt-5-mini"
+llm_prompt_path = "src/explainer/explain.txt"
 no_template_fallback = false
+enable_understanding_eval = true
+max_understanding_samples = 120
+use_llm_user_simulator = false
+use_llm_evaluator = false
+simulator_model = "gpt-5-mini"
+evaluator_model = "gpt-5-mini"
+simulator_prompt_path = "src/explainer/simulator.txt"
+evaluator_prompt_path = "src/explainer/evaluator.txt"
+understanding_log_jsonl = "reports/e2e/explainer_understanding_logs.jsonl"

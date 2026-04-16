@@ -36,11 +36,13 @@ def parse_custom_user_frame(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
 
     out["user_id"] = out["CUST_ID"]
-    out["AGE"] = pd.to_numeric(out.get("AGE", 30), errors="coerce").fillna(30)
+    age_src = out["AGE"] if "AGE" in out.columns else pd.Series(30, index=out.index)
+    out["AGE"] = pd.to_numeric(age_src, errors="coerce").fillna(30)
 
     s_trust = out["s_trust"] if "s_trust" in out.columns else pd.Series(50.0, index=out.index)
     s_activity = out["s_activity"] if "s_activity" in out.columns else pd.Series(50.0, index=out.index)
     s_potential = out["s_potential"] if "s_potential" in out.columns else pd.Series(50.0, index=out.index)
+    tps_score = out["tps_score"] if "tps_score" in out.columns else (0.4 * s_trust + 0.3 * s_activity + 0.3 * s_potential)
 
     out["risk_tol"] = (out["CB_SCORE"] / 1000 * 1.5 + (s_potential / 100) * 1.5).clip(0, 3)
     out["liquidity_need"] = (2.0 - (s_trust / 100 * 1.5)).clip(0, 2)
@@ -54,6 +56,10 @@ def parse_custom_user_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["telecom_payment_consistency"] = 0.9
     out["card_usage_stability"] = (s_trust / 100).clip(0, 1)
     out["spending_vs_balance_ratio"] = 0.5
+    out["tps_score"] = pd.to_numeric(tps_score, errors="coerce").fillna(50.0)
+    out["tps_trust"] = pd.to_numeric(s_trust, errors="coerce").fillna(50.0)
+    out["tps_activity"] = pd.to_numeric(s_activity, errors="coerce").fillna(50.0)
+    out["tps_potential"] = pd.to_numeric(s_potential, errors="coerce").fillna(50.0)
     out["C1M210000"] = out["CB_SCORE"]
     out["CD_USE_AMT"] = out["TOTAL_SPENDING"]
     out["TOT_ASST"] = out["EST_INCOME"]
@@ -72,4 +78,3 @@ def parse_new_user(user_dict: Dict) -> Dict:
     out.setdefault("as_of_date", "2022Q4")
     out.setdefault("STDT", 202212)
     return out
-

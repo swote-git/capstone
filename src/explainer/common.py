@@ -113,6 +113,29 @@ def expected_summary_line(explanation_object: Dict[str, Any]) -> str:
     )
 
 
+def expected_product_info_lines(explanation_object: Dict[str, Any]) -> List[str]:
+    p = explanation_object.get("recommended_product", {})
+    d = explanation_object.get("recommended_product_detail", {})
+    meta = d.get("product_meta", {}) if isinstance(d, dict) else {}
+    principal_var = bool(d.get("principal_variation", False)) if isinstance(d, dict) else False
+    principal_text = "있음" if principal_var else "없음"
+
+    lines = [
+        f"상품군: {p.get('family', '')}",
+        f"위험수준: {p.get('risk', '')}",
+        f"유동성: {p.get('liquidity', '')}",
+        f"투자기간: {d.get('horizon', '')}",
+        f"복잡도: {d.get('complexity', '')}",
+        f"원금 변동 가능성: {principal_text}",
+    ]
+    if "max_rate" in meta:
+        try:
+            lines.append(f"수익지표(참고): {float(meta.get('max_rate', 0.0)):.4f}")
+        except Exception:
+            pass
+    return lines
+
+
 def top_feature_cols(rec: Any) -> Sequence[str]:
     if rec.feature_columns:
         return list(rec.feature_columns)

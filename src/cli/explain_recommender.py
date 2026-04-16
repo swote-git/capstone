@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-llm-renderer", action="store_true", help="Use OpenAI API renderer for explanation text")
     p.add_argument("--llm-model", type=str, default="gpt-5-mini")
     p.add_argument(
+        "--llm-prompt-path",
+        type=Path,
+        default=Path("src/explainer/explain.txt"),
+        help="Path to LLM system prompt text file",
+    )
+    p.add_argument(
         "--no-template-fallback",
         action="store_true",
         help="Do not fallback to deterministic template when LLM output fails verifier",
@@ -43,7 +49,7 @@ def main() -> None:
 
     llm_renderer = None
     if args.use_llm_renderer:
-        llm_renderer = OpenAILLMRenderer(model=args.llm_model)
+        llm_renderer = OpenAILLMRenderer(model=args.llm_model, prompt_path=args.llm_prompt_path)
 
     result = rec.explain_recommendation_with(
         snapshots.iloc[0],

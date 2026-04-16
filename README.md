@@ -17,6 +17,12 @@ It follows the requested architecture:
 7. `LightGBMRanker` training (`lambdarank`, grouped by user)
 8. Top-K recommendation
 
+## Architecture Docs
+
+- Korean architecture overview: `architecture_ko.md`
+- English architecture overview: `architecture.md`
+- Layer role + input/output data spec (Korean): `layer_io_spec_ko.md`
+
 ## Install
 
 ```bash
@@ -68,7 +74,7 @@ PYTHONPATH=src python3 -m cli.explain_recommender --fit --sample-users 200 --max
 Grounded explainer with OpenAI LLM renderer (object-grounded verbalization):
 
 ```bash
-export OPENAI_API_KEY=your_api_key
+set -a; source .env; set +a
 PYTHONPATH=src python3 -m cli.explain_recommender --fit --sample-users 200 --top-k 5 --use-llm-renderer --llm-model gpt-5-mini
 ```
 
@@ -76,6 +82,14 @@ Explainer batch evaluation (RC/HR/pass rate):
 
 ```bash
 PYTHONPATH=src python3 -m cli.evaluate_explainer --fit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5
+```
+
+Explainer understanding evaluation (quality + UG/MR):
+
+```bash
+PYTHONPATH=src python3 -m cli.evaluate_explainer \
+  --fit --family deposit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5 \
+  --enable-understanding-eval --max-understanding-samples 120
 ```
 
 Evaluation report (baseline vs ranker):
@@ -108,6 +122,10 @@ Run with single root config (`run_config.toml`):
 PYTHONPATH=src python3 -m cli.improve_recommender_with_utility --config run_config.toml
 PYTHONPATH=src python3 -m cli.evaluate_explainer --config run_config.toml
 ```
+
+`run_config.toml`에서 LLM 프롬프트 파일 경로는 `llm_prompt_path`로 제어합니다
+(예: `src/explainer/explain.txt`).
+이해도 평가 프롬프트는 `simulator_prompt_path`, `evaluator_prompt_path`로 제어합니다.
 
 ## Execution Guideline (Recommended Order)
 
@@ -158,7 +176,7 @@ PYTHONPATH=src python3 -m cli.improve_recommender_with_utility \
 PYTHONPATH=src python3 -m cli.explain_recommender --fit --family deposit --sample-users 200 --top-k 5
 
 # OpenAI LLM renderer (grounded verbalization only)
-export OPENAI_API_KEY=your_api_key
+set -a; source .env; set +a
 PYTHONPATH=src python3 -m cli.explain_recommender \
   --fit --family deposit --sample-users 200 --top-k 5 \
   --use-llm-renderer --llm-model gpt-5-mini
@@ -168,6 +186,13 @@ PYTHONPATH=src python3 -m cli.explain_recommender \
 ```bash
 PYTHONPATH=src python3 -m cli.evaluate_explainer \
   --fit --family deposit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5
+```
+
+7. Run understanding-effect evaluation (UG/MR)
+```bash
+PYTHONPATH=src python3 -m cli.evaluate_explainer \
+  --fit --family deposit --sample-users 300 --max-train-users 200 --max-eval-users 80 --top-k 5 \
+  --enable-understanding-eval --max-understanding-samples 120
 ```
 
 ### Where to check results

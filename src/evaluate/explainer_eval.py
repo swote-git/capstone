@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+from .explainer_understanding_eval import ExplainerUnderstandingEvaluator
 
 
 def sample_users(df: pd.DataFrame, user_col: str, max_users: int, random_state: int) -> pd.DataFrame:
@@ -18,7 +20,13 @@ def _mean_or_zero(values: List[float]) -> float:
     return float(np.mean(values)) if values else 0.0
 
 
-def evaluate_explainer_batch(explainer: Any, eval_snapshots: pd.DataFrame, top_k: int) -> Dict[str, object]:
+def evaluate_explainer_batch(
+    explainer: Any,
+    eval_snapshots: pd.DataFrame,
+    top_k: int,
+    understanding_evaluator: Optional[ExplainerUnderstandingEvaluator] = None,
+    max_understanding_samples: int = 0,
+) -> Dict[str, object]:
     alignments: List[float] = []
     hallucinations: List[float] = []
     fact_consistency: List[float] = []
@@ -28,6 +36,8 @@ def evaluate_explainer_batch(explainer: Any, eval_snapshots: pd.DataFrame, top_k
     reason_feature_counts: Dict[str, int] = {}
     reason_patterns: Dict[str, int] = {}
     failed_examples: List[Dict[str, object]] = []
+    understanding_records: List[Dict[str, object]] = []
+    understanding_limit = int(max_understanding_samples) if int(max_understanding_samples) > 0 else 0
 
     for _, user_row in eval_snapshots.iterrows():
         out = explainer.explain_top_k(user_row, k=top_k)
@@ -57,7 +67,46 @@ def evaluate_explainer_batch(explainer: Any, eval_snapshots: pd.DataFrame, top_k
                     }
                 )
 
+            if understanding_evaluator is not None:
+                if understanding_limit <= 0 or len(understanding_records) < understanding_limit:
+                    understanding_records.append(
+                        understanding_evaluator.evaluate_recommendation(
+                            user_id=str(out["user_id"]),
+                            recommendation_item=rec_item,
+                        )
+                    )
+
     top_reason_features = sorted(reason_feature_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    understanding_summary: Dict[str, object] = {
+        "enabled": bool(understanding_evaluator is not None),
+        "evaluated_count": int(len(understanding_records)),
+        "metrics": {},
+        "sample_records": [],
+        "records": understanding_records,
+    }
+    if understanding_evaluator is not None:
+        understanding_summary["metrics"] = understanding_evaluator.summarize(understanding_records)
+        compact_samples: List[Dict[str, object]] = []
+        for r in understanding_records[:5]:
+            compact_samples.append(
+                {
+                    "user_id": str(r.get("user_id", "")),
+                    "product_id": str(r.get("product_id", "")),
+                    "render_source": str(r.get("render_source", "")),
+                    "total_before": int(r.get("total_before", 0)),
+                    "total_after": int(r.get("total_after", 0)),
+                    "scores_before": r.get("scores_before", {}),
+                    "scores_after": r.get("scores_after", {}),
+                    "understanding_gain": float(
+                        (r.get("effect_scores", {}) or {}).get("understanding_gain", 0.0)
+                    ),
+                    "misinterpretation_rate": float(
+                        (r.get("effect_scores", {}) or {}).get("misinterpretation_rate", 0.0)
+                    ),
+                }
+            )
+        understanding_summary["sample_records"] = compact_samples
 
     return {
         "coverage": {
@@ -81,5 +130,5 @@ def evaluate_explainer_batch(explainer: Any, eval_snapshots: pd.DataFrame, top_k
             for p, c in sorted(reason_patterns.items(), key=lambda x: x[1], reverse=True)[:10]
         ],
         "failed_examples": failed_examples,
+        "understanding_eval": understanding_summary,
     }
-

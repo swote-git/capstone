@@ -19,6 +19,9 @@
   -> [Explanation Object]
   -> [Renderer(Template/OpenAI)]
   -> [Verifier]
+  -> [User Simulator (설명 없음/있음 비교)]
+  -> [LLM/Rule Evaluator]
+  -> [6개 지표 산출: Personalization/Grounding/Clarity/Compliance/UG/MR]
 ```
 
 ## 3. 코드 구조 (src)
@@ -42,6 +45,7 @@ src/
   evaluate/
     recommender_eval.py   # 추천 평가 공용 로직
     explainer_eval.py     # 설명 평가 공용 로직
+    explainer_understanding_eval.py # 이해도(UG/MR) 평가 로직
 
   user_parser/
     tps.py                # 사용자 입력/TPS 파싱
@@ -81,11 +85,19 @@ PYTHONPATH=src python3 -m cli.improve_recommender_with_utility --config run_conf
 ## 6. 레이어 분리 원칙
 - `recommender/`: 추천 모델링/랭킹 전담
 - `explainer/`: 설명 파이프라인 + 검증 전담
-- `evaluate/`: 실험/평가 집계 전담
+- `evaluate/`: 실험/평가 집계 + 이해도(UG/MR) 평가 전담
 - `user_parser/`: 외부 사용자 입력/CSV 파싱 전담
 - `cli/`: 실행 오케스트레이션만 담당 (얇은 엔트리)
 
-## 7. 핵심 개선 사항
+## 7. 설명 평가 2계층
+- 설명 품질 계층:
+  - `reason_coverage_rc`, `hallucination_rate_hr`, `fact_consistency_rate`, `verification_pass_rate`
+  - `personalization`, `product_grounding`, `terminology_clarity`, `compliance`
+- 이해 효과 계층:
+  - `understanding_gain (UG)` = 설명 후 정답률 - 설명 전 정답률
+  - `misinterpretation_rate (MR)` = 오해 판정 개수 / 총 질문 수
+
+## 8. 핵심 개선 사항
 - `src/thin_filer` 깊이 제거 및 도메인별 디렉토리 재구성
 - `scripts`는 단발성(analysis/visualization)만 유지
 - 메인 엔트리포인트 `main.py` 도입
