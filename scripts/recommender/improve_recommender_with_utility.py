@@ -4,10 +4,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+if str(ROOT_DIR / "src") not in sys.path:
+    sys.path.append(str(ROOT_DIR / "src"))
 
 import matplotlib
 matplotlib.use("Agg")
@@ -20,6 +27,7 @@ import seaborn as sns
 from thin_filer.pipeline_config import RecommenderConfig
 from thin_filer.pipeline_helpers import _ndcg_at_k
 from thin_filer.recommender import ThinFilerRecommender
+from scripts.common.runtime_config import parse_args_with_config
 
 try:
     from lightgbm import LGBMRanker
@@ -47,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--candidate-max", type=int, default=120)
     p.add_argument("--out-dir", type=Path, default=Path("reports/improved_recommender"))
     p.add_argument("--out-json", type=Path, default=Path("reports/raw/improved_recommender_report.json"))
-    return p.parse_args()
+    return parse_args_with_config(p, section="improve_recommender_with_utility")
 
 
 def split_users(snapshots: pd.DataFrame, user_col: str, train_ratio: float = 0.8) -> Tuple[pd.DataFrame, pd.DataFrame]:

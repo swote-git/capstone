@@ -1,0 +1,29 @@
+common:
+  data_root: data
+  sample_users: 120
+  max_train_users: 80
+  max_eval_users: 40
+
+improve_recommender_with_utility:
+  family: deposit
+  candidate_max: 80
+  ks: [5, 10]
+  out_dir: reports/e2e/improved_recommender_deposit_cfg
+  out_json: reports/raw/e2e_improved_recommender_deposit_cfg.json
+
+tps_main_v2:
+  csv_path: data/thin_filer/신파일러_군집_최종_피처_통합.csv
+  out_csv: reports/e2e/신파일러_TPS_최종_산출_cfg.csv
+
+evaluate_custom_v2:
+  csv_path: data/thin_filer/신파일러_군집_최종_피처_통합.csv
+  fit: true
+  ks: [5, 10]
+
+evaluate_explainer:
+  family: all
+  top_k: 5
+  fit: true
+  use_llm_renderer: false
+  llm_model: gpt-5-mini
+  no_template_fallback: false

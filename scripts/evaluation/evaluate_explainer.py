@@ -3,11 +3,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+if str(ROOT_DIR / "src") not in sys.path:
+    sys.path.append(str(ROOT_DIR / "src"))
+
+from scripts.common.runtime_config import parse_args_with_config
 from thin_filer.explainer import GroundedExplainer
 from thin_filer.llm_renderer import OpenAILLMRenderer
 from thin_filer.pipeline_config import RecommenderConfig
@@ -27,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-llm-renderer", action="store_true")
     p.add_argument("--llm-model", type=str, default="gpt-5-mini")
     p.add_argument("--no-template-fallback", action="store_true")
-    return p.parse_args()
+    return parse_args_with_config(p, section="evaluate_explainer")
 
 
 def _sample_users(df, user_col: str, max_users: int, random_state: int):

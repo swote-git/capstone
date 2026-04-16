@@ -252,7 +252,7 @@ class ThinFilerRecommender:
         
         # If join failed, try heuristic
         join_rate = snapshots[self.config.user_key_09].notna().mean()
-        if join_rate < 0.01:
+        if self.config.enable_heuristic_id_bridge and join_rate < 0.01:
             bridge = self._heuristic_id_bridge(t11[self.config.user_key_11], t09[self.config.user_key_09])
             if bridge:
                 t11["bridged_id"] = t11[self.config.user_key_11].map(bridge)
@@ -310,20 +310,15 @@ class ThinFilerRecommender:
         key09_lengths = (
             sorted(s[key09].dropna().astype(str).str.len().dropna().unique().tolist()) if key09 in s.columns else []
         )
+        overall = self.snapshot_quality_report(snapshots)
 
         overlap_rate = 0.0
         overlap_count = 0
         if key11 in s.columns and key09 in s.columns:
             left = set(s[key11].astype(str).unique())
             right = set(s[key09].dropna().astype(str).unique())
-            
-            # If direct join failed but rows joined (due to heuristic), count as overlap
-            if report["overall"]["cb_join_rate"] > 0.9 and len(left & right) == 0:
-                overlap_count = len(left)
-                overlap_rate = 1.0
-            else:
-                overlap_count = len(left & right)
-                overlap_rate = overlap_count / max(1, len(left))
+            overlap_count = len(left & right)
+            overlap_rate = overlap_count / max(1, len(left))
 
         by_quarter = []
         if "as_of_date" in snapshots.columns and "cb_join_found" in snapshots.columns:
@@ -339,7 +334,7 @@ class ThinFilerRecommender:
             by_quarter = g.to_dict(orient="records")
 
         report: Dict[str, object] = {
-            "overall": self.snapshot_quality_report(snapshots),
+            "overall": overall,
             "sample_size": int(len(s)),
             "key_profile": {
                 "table11_key_col": key11,
@@ -651,11 +646,12 @@ class ThinFilerRecommender:
 
     def _compute_baseline_score(self, pair: pd.DataFrame) -> pd.DataFrame:
         w = self.config.baseline_weights
-        # Simplified linear combination for baseline
         pair["baseline_score"] = (
             w["risk_match"] * pair["risk_match"]
             + w["liquidity_match"] * pair["liquidity_match"]
             + w["horizon_match"] * pair["horizon_match"]
+            + w.get("complexity_match", 0.0) * pair["complexity_match"]
+            + w.get("digital_match", 0.0) * pair["digital_match"]
         )
         return pair
 
@@ -666,48 +662,26 @@ class ThinFilerRecommender:
         return pair
 
     def _build_labels(self, pair: pd.DataFrame) -> pd.Series:
-        import hashlib
-
-        def _user_noise(uid: object) -> float:
-            h = hashlib.md5(str(uid).encode()).hexdigest()
-            return (int(h[:4], 16) % 100) / 100.0
-
-        # [현실화] 무작위 노이즈 대폭 강화 (nDCG 1.0 방지)
-        np.random.seed(42)
-        random_noise = np.random.normal(0, 0.2, size=len(pair))
-
-        # Non-linear interaction terms
-        interaction = (
-            pair["risk_match"] * pair["horizon_match"] * 0.2
-            + pair["liquidity_match"] * (1.0 - pair["risk_level"] / 4.0) * 0.15
-        )
-        
-        # Dim인ishing returns on match scores
+        max_rate = pd.to_numeric(pair.get("max_rate", 0), errors="coerce").fillna(0.0)
+        rate_norm = max_rate.rank(method="average", pct=True).astype(float)
         utility = (
-            0.25 * np.sqrt(pair["risk_match"])
-            + 0.20 * np.sqrt(pair["liquidity_match"])
-            + 0.15 * pair["horizon_match"]
+            0.30 * pair["risk_match"]
+            + 0.25 * pair["liquidity_match"]
+            + 0.20 * pair["horizon_match"]
             + 0.10 * pair["complexity_match"]
-            + 0.10 * pair["family_match"]
-            + interaction
-            + random_noise
+            + 0.05 * pair["amount_feasibility"]
+            + 0.05 * pair["family_match"]
+            + 0.05 * rate_norm
         )
-
-        # Add deterministic noise based on User ID
-        noise_weight = 0.25
-        if self.config.user_key_11 in pair.columns:
-            u_noise = pair[self.config.user_key_11].map(_user_noise)
-            utility += noise_weight * u_noise
 
         n = len(utility)
         if n < 4:
             labels = np.where(utility >= utility.median(), 2, 1)
             return pd.Series(labels, index=pair.index, dtype="int64")
 
-        # 4-level labels with non-uniform distribution
-        rank_pct = utility.rank(method="average", pct=True)
+        q80, q55, q30 = utility.quantile([0.80, 0.55, 0.30]).tolist()
         labels = np.select(
-            [rank_pct >= 0.92, rank_pct >= 0.75, rank_pct >= 0.45],
+            [utility >= q80, utility >= q55, utility >= q30],
             [3, 2, 1],
             default=0,
         )

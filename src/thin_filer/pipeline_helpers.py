@@ -166,11 +166,11 @@ def _read_csv_selected(path: Path, desired_cols: Sequence[str]) -> pd.DataFrame:
     try:
         header = pd.read_csv(path, nrows=0, encoding="utf-8")
         usecols = [c for c in desired_cols if c in header.columns]
-        return pd.read_csv(path, usecols=usecols, dtype=str, low_memory=False, encoding="utf-8", nrows=10000)
+        return pd.read_csv(path, usecols=usecols, dtype=str, low_memory=False, encoding="utf-8")
     except UnicodeDecodeError:
         header = pd.read_csv(path, nrows=0, encoding="cp949")
         usecols = [c for c in desired_cols if c in header.columns]
-        return pd.read_csv(path, usecols=usecols, dtype=str, low_memory=False, encoding="cp949", nrows=10000)
+        return pd.read_csv(path, usecols=usecols, dtype=str, low_memory=False, encoding="cp949")
 
 
 def _dcg_at_k(relevance: np.ndarray, k: int) -> float:
