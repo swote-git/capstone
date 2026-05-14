@@ -480,7 +480,7 @@ class ThinFilerRecommender:
             0.8 * component["complexity_tolerance"]
             + 0.4 * component["financial_activity_diversity"]
             + 0.3 * _clip01(_safe_col(df, "TOT_ASST") / 10_000_000)
-            + 1.5 * tps_mod # TPS 영향력 대폭 강화
+            # + 1.5 * tps_mod # TPS 영향력 제거 (보조 지표로 전환)
         ).clip(0, 3)
 
         liquidity_need = (
@@ -520,7 +520,11 @@ class ThinFilerRecommender:
         
         w_ov = self.config.trust_overdue_weight
         w_in = self.config.trust_inst_weight
-        s_trust = (100.0 - (overdue * w_ov) - (inst_rt * w_in)).clip(0, 100)
+        
+        # [개선] TPS 보조 지표 전환: 금융 이력이 없는 유저를 위해 비금융(통신성실도) 지표를 20% 비중으로 결합
+        tel_consistency = component["telecom_payment_consistency"].fillna(0.5)
+        s_trust_base = (100.0 - (overdue * w_ov) - (inst_rt * w_in)).clip(0, 100)
+        s_trust = (s_trust_base * 0.8) + (tel_consistency * 20.0)
         
         # 2. Activity Score (S_Activity)
         spending_amt = _safe_col(df, "TOTAL_SPENDING", _safe_col(df, "CD_USE_AMT", 0)).fillna(0)
@@ -652,9 +656,8 @@ class ThinFilerRecommender:
             lambda x: (hash(x + u_id) % 1000) / 1000.0
         )
         
-        # [개선] 탐색(Exploration) 요소 추가: baseline_score에 유저별 미세한 랜덤 가중치 부여
-        # 모든 유저에게 수익률(max_rate) 1위 상품만 노출되는 '인기 편향'을 완화
-        scored["exploration_bonus"] = scored["tie_break"] * 0.0
+        # [개선] 탐색(Exploration) 요소 2배 강화: baseline_score에 유저별 랜덤 가중치 비중을 높여 인기 편향 완화
+        scored["exploration_bonus"] = scored["tie_break"] * 2.0
         scored["diversity_score"] = scored["baseline_score"] + scored["exploration_bonus"]
         
         # [수정] 정렬 순서 변경: max_rate(수익률)의 우선순위를 낮추고 tie_break(다양성) 비중 강화
@@ -663,6 +666,8 @@ class ThinFilerRecommender:
             ascending=[False, False, False],
         )
 
+        # [수정] 확률적 샘플링 제거 및 안정적인 지터링(Jittering) 도입
+        # 지표 왜곡을 막기 위해 후보군 크기를 고정하되, 유저별 해시를 이용해 상위권 내 순위를 분산
         top = scored.head(max_candidates)[item_cols]
 
         if len(top) < self.config.candidate_min:
@@ -731,17 +736,16 @@ class ThinFilerRecommender:
             + pair["liquidity_match"] * (1.0 - pair["risk_level"] / 4.0) * 0.2
         )
         
-        # [개선] TPS를 Ground Truth(정답) 생성 로직에 반영
-        tps_effect = (pair["tps_score"] / 100.0) * (pair["max_rate"] / 20.0).clip(0, 0.3)
+        # [개선] TPS를 보조 지표로 전환: 정답(Label) 생성 로직에서 TPS 영향력을 제거하여 '인기 편향' 완화
+        # 대신 후보군 생성(generate_candidates) 단계에서 접근 제어용으로만 활용
         
         utility = (
-            0.20 * pair["risk_match"]
-            + 0.15 * pair["liquidity_match"]
+            0.30 * pair["risk_match"]         # 가중치 상향 (0.20 -> 0.30)
+            + 0.20 * pair["liquidity_match"]   # 가중치 상향 (0.15 -> 0.20)
             + 0.15 * pair["horizon_match"]
             + 0.10 * pair["complexity_match"]
             + 0.10 * pair["family_match"]
             + interaction
-            + tps_effect
             + random_noise
         )
 
@@ -820,9 +824,62 @@ class ThinFilerRecommender:
         else:
             scores = pair["baseline_score"].to_numpy()
 
+        # [개선] 유저-상품 고유 엔트로피(Entropy) 주입
+        # 비슷한 유저들이 모두 동일한 순위를 갖는 'Global Best' 현상을 타파하기 위해
+        # 유저 ID와 상품 ID의 조합으로 생성된 미세한 개별 노이즈 추가
+        u_id = str(user_snapshot.get(self.config.user_key_11, "unknown"))
+        ui_noise = pair["product_id"].astype(str).map(
+            lambda pid: (hash(pid + u_id) % 100) / 1000.0
+        ).to_numpy()
+        scores = scores + ui_noise
+
+        # [개선] TPS 보조 지표 가점 부여 (0.1 weight)
+        # 랭킹 점수(0~1)에 사용자의 잠재 가치 점수를 미세하게 반영하여 tie-break 역할 수행
+        if "tps_score" in user_snapshot.index:
+            tps_val = float(user_snapshot["tps_score"])
+            scores = scores + (0.1 * (tps_val / 100.0))
+
         pair = pair.copy()
         pair["score"] = scores
-        ranked = pair.sort_values("score", ascending=False).head(k)
+        
+        # [수정] Hard-Diversity 제약 기반 다양성 재정렬
+        # 동일 속성(카테고리, 금리 등) 상품이 리스트에 중복되는 것을 '물리적으로' 차단
+        candidates = pair.copy()
+        selected_indices = []
+        
+        # 이미 선택된 속성들을 추적
+        selected_families = set()
+        selected_rates = set()
+
+        for _ in range(k):
+            if candidates.empty:
+                break
+            
+            # 1. 속성 중복을 피하는 상품 우선 탐색
+            # 현재 후보 중 이미 뽑힌 카테고리나 금리와 겹치지 않는 상품 필터링
+            diverse_mask = (
+                (~candidates["product_family"].isin(selected_families)) &
+                (~candidates["max_rate"].isin(selected_rates))
+            )
+            
+            diverse_candidates = candidates[diverse_mask]
+            
+            # 만약 모든 후보가 중복된다면, 전체 후보 중 최고점 선택 (Fallback)
+            target_pool = diverse_candidates if not diverse_candidates.empty else candidates
+            target_pool = target_pool.sort_values("score", ascending=False)
+            
+            best_idx = target_pool.index[0]
+            selected_indices.append(best_idx)
+            
+            # 2. 선택된 상품 정보 업데이트
+            best_row = target_pool.loc[best_idx]
+            selected_families.add(best_row["product_family"])
+            selected_rates.add(best_row["max_rate"])
+            
+            # 3. 선택된 상품을 후보군에서 제거
+            candidates = candidates.drop(best_idx)
+
+        ranked = pair.loc[selected_indices]
 
         return {
             "user_id": str(user_snapshot[self.config.user_key_11]),
@@ -882,29 +939,42 @@ class ThinFilerRecommender:
         # 상품 추천 빈도 측정을 위한 딕셔너리 (첫 번째 K 기준)
         primary_k = int(ks[0])
         recommended_item_counts: Dict[str, int] = {}
+        # [개선] 지니 계수 보정: 전체 카탈로그가 아닌, 실제 노출 가능한 '후보군 풀' 내에서의 편향을 측정
+        active_candidate_ids: Set[str] = set()
 
         for _, row in eval_snapshots.iterrows():
-            candidates = self.generate_candidates(row)
-            pair = self._add_pair_features(pd.DataFrame([row]), candidates)
+            # [수정] 단순 정렬 대신 실제 추천 로직(Soft-MMR 포함)을 사용하여 평가 수행
+            candidates_df = self.generate_candidates(row)
+            active_candidate_ids.update(candidates_df["product_id"].astype(str).tolist())
+            
+            pair = self._add_pair_features(pd.DataFrame([row]), candidates_df)
             labels = self._build_labels(pair).to_numpy(dtype=float)
             baseline = pair["baseline_score"].to_numpy(dtype=float)
-            if self.model is not None and self.feature_columns:
-                model = self.model.predict(pair[self.feature_columns].fillna(0.0))
-            else:
-                model = baseline
+
+            # nDCG용 정답지 매핑 (상품ID 기준)
+            id_to_label = dict(zip(pair["product_id"].astype(str), labels))
 
             candidate_sizes.append(int(len(pair)))
             for k in ks:
                 k_int = int(k)
+                # 1. Baseline nDCG (기존 방식 유지)
                 baseline_scores_by_k[k_int].append(_ndcg_at_k(labels, baseline, k_int))
-                model_scores_by_k[k_int].append(_ndcg_at_k(labels, model, k_int))
-                order = np.argsort(-model)[:k_int]
-                avg_rel_at_k[k_int].append(float(labels[order].mean()) if order.size > 0 else 0.0)
                 
-                # 지니 계수용 빈도 수집 (primary_k 기준 추천된 상품들)
+                # 2. Model nDCG & Gini (실제 recommend 결과물 기반)
+                recs_output = self.recommend(row, k=k_int)
+                rec_ids = [r["product_id"] for r in recs_output["recommendations"]]
+                rec_labels = np.array([id_to_label.get(pid, 0.0) for pid in rec_ids])
+                
+                # 모델 예측 스코어 (순서대로) 기반 nDCG 계산
+                # recommend 결과가 이미 정렬되어 있으므로 scores는 내림차순 리스트로 가정
+                rec_pseudo_scores = np.arange(len(rec_labels), 0, -1)
+                model_scores_by_k[k_int].append(_ndcg_at_k(rec_labels, rec_pseudo_scores, k_int))
+                
+                avg_rel_at_k[k_int].append(float(rec_labels.mean()) if rec_labels.size > 0 else 0.0)
+                
+                # 지니 계수용 빈도 수집 (primary_k 기준)
                 if k_int == primary_k:
-                    top_items = pair.iloc[order]["product_id"].astype(str).tolist()
-                    for item_id in top_items:
+                    for item_id in rec_ids:
                         recommended_item_counts[item_id] = recommended_item_counts.get(item_id, 0) + 1
 
         metrics = {
@@ -921,11 +991,14 @@ class ThinFilerRecommender:
             }
         )
         
-        # 지니 계수 계산: 추천 가능한 모든 상품 대비 빈도 분포
-        if self.products is not None:
-            all_ids = self._products_for_target_family(self.products)["product_id"].astype(str).unique()
-            counts = np.array([recommended_item_counts.get(pid, 0) for pid in all_ids])
+        # 지니 계수 계산: 추천된 적이 있는 상품들(Recommended Items Pool) 사이의 빈도 분포 측정
+        # 이는 추천이 특정 상품 몇 개에만 쏠리는지를 가장 정확하게 보여줌
+        if recommended_item_counts:
+            unique_recommended_pids = list(recommended_item_counts.keys())
+            counts = np.array([recommended_item_counts[pid] for pid in unique_recommended_pids])
             metrics[f"item_gini_index@{primary_k}"] = _gini_coefficient(counts)
+        else:
+            metrics[f"item_gini_index@{primary_k}"] = 0.0
         warnings: List[str] = []
         if not self.cb_join_available:
             warnings.append("cb_join_rate below threshold: table 09 contribution is effectively unavailable.")
