@@ -102,8 +102,8 @@ class ThinFilerRecommender:
         return cb
 
     def _load_and_normalize_products(self) -> pd.DataFrame:
-        deposit_path = self._table12_path / "은행수신상품.csv"
-        fund_path = self._table12_path / "공모펀드상품.csv"
+        deposit_path = self._table12_path / "deposit_products.csv"
+        fund_path = self._table12_path / "fund_products.csv"
 
         def _read_csv_safe(path):
             try:
@@ -120,6 +120,11 @@ class ThinFilerRecommender:
             {
                 "product_id": dep.get("상품코드", dep.index.astype(str)).astype(str),
                 "product_name": dep.get("상품명", "deposit").astype(str),
+                "description": (
+                    dep.get("은행명", "").astype(str) 
+                    + ": " 
+                    + dep.get("상품개요_설명", "").astype(str)
+                ).str.strip(": "),
                 "product_family": "deposit",
                 "risk_level": 0,
                 "liquidity_level": np.where(
@@ -156,6 +161,11 @@ class ThinFilerRecommender:
             {
                 "product_id": fund.get("펀드코드", fund.index.astype(str)).astype(str),
                 "product_name": fund.get("펀드명", "fund").astype(str),
+                "description": (
+                    fund.get("운용사명", "").astype(str) 
+                    + ": " 
+                    + fund.get("투자전략", "").astype(str)
+                ).str.strip(": "),
                 "product_family": "fund",
                 "risk_level": (raw_risk - 1).clip(0, 3).astype("int64"),
                 "liquidity_level": np.where(
@@ -884,8 +894,13 @@ class ThinFilerRecommender:
         return {
             "user_id": str(user_snapshot[self.config.user_key_11]),
             "recommendations": [
-                {"product_id": str(r.product_id), "score": float(r.score)}
-                for r in ranked[["product_id", "score"]].itertuples(index=False)
+                {
+                    "product_id": str(r.product_id), 
+                    "product_name": str(r.product_name),
+                    "description": str(r.description),
+                    "score": float(r.score)
+                }
+                for r in ranked[["product_id", "product_name", "description", "score"]].itertuples(index=False)
             ],
         }
 

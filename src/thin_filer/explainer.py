@@ -78,6 +78,8 @@ class GroundedExplainer:
             outputs.append(
                 {
                     "product_id": str(row["product_id"]),
+                    "product_name": str(row.get("product_name", "Unknown")),
+                    "description": str(row.get("description", "")),
                     "score": float(row["score"]),
                     "reason_signals": [r.__dict__ for r in reason_signals],
                     "product_facts": product_facts,
