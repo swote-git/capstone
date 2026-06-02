@@ -41,13 +41,17 @@ DEFAULT_SIMULATOR_PROMPT = (
 
 DEFAULT_EVALUATOR_PROMPT = (
     "당신은 금융 설명 이해도 평가자입니다.\n"
-    "사용자 답변과 정답을 비교해 질문별 0/1 점수를 부여하세요.\n"
+    "사용자 답변과 정답을 비교해 질문별 0~20 점수(실수 가능)를 부여하세요.\n"
     "[채점 기준]\n"
-    "- 1점: 의미상 정답\n"
+    "- 20점: 핵심 의미가 정확히 일치\n"
+    "- 10점 전후: 일부만 맞고 핵심이 누락/모호\n"
     "- 0점: 오답/불명확/근거 없는 추론\n"
     "[출력]\n"
     "반드시 JSON으로만 응답: "
-    "{\"Q1\":0,\"Q2\":0,\"Q3\":0,\"Q4\":0,\"Q5\":0,\"total\":0,\"misinterpretations\":[]}"
+    "{\"Q1\":12.5,\"Q2\":8.0,\"Q3\":16.0,\"Q4\":14.0,\"Q5\":6.0,\"total\":56.5,"
+    "\"misinterpretations\":[],"
+    "\"score_reasons\":{\"Q1\":\"...\",\"Q2\":\"...\",\"Q3\":\"...\",\"Q4\":\"...\",\"Q5\":\"...\"}}"
+    "\nmisinterpretations 항목은 가능하면 `major:` 또는 `minor:` 접두어를 붙여주세요."
 )
 
 
@@ -97,6 +101,64 @@ def _extract_json(text: str) -> Dict[str, Any]:
 def _contains_any(text: str, keywords: Sequence[str]) -> bool:
     t = _normalize(text)
     return any(k.lower() in t for k in keywords if k)
+
+
+def _coerce_score_0_20(value: Any) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        return 0.0
+    if np.isnan(v) or np.isinf(v):
+        return 0.0
+    return float(max(0.0, min(20.0, v)))
+
+
+def _normalize_scores_0_20(scores: Dict[str, Any]) -> Dict[str, float]:
+    out = {f"Q{i}": _coerce_score_0_20(scores.get(f"Q{i}", 0.0)) for i in range(1, 6)}
+    # Backward compatibility: if evaluator returns legacy 0/1 scale, auto-upscale to 0/20.
+    max_v = max(out.values()) if out else 0.0
+    if max_v <= 1.0:
+        out = {k: float(v * 20.0) for k, v in out.items()}
+    return out
+
+
+def _classify_misinterpretation_severity(msg: str) -> str:
+    t = _normalize(str(msg or ""))
+    if not t:
+        return "minor"
+    # Explicit tags from evaluator output.
+    if t.startswith("major:") or t.startswith("[major]"):
+        return "major"
+    if t.startswith("minor:") or t.startswith("[minor]"):
+        return "minor"
+
+    major_keywords = [
+        "정반대로",
+        "오해",
+        "오답",
+        "불일치",
+        "핵심 누락",
+        "누락/무시",
+        "위험 상품을 안정",
+        "안정형 상품을 고위험",
+        "비교 핵심",
+    ]
+    if any(k in t for k in major_keywords):
+        return "major"
+    return "minor"
+
+
+def _weighted_misinterpretation_rate(mis_list: Sequence[str], denominator: float = 5.0) -> Tuple[float, int, int]:
+    major = 0
+    minor = 0
+    for m in mis_list:
+        sev = _classify_misinterpretation_severity(str(m))
+        if sev == "major":
+            major += 1
+        else:
+            minor += 1
+    weighted = (float(major) + 0.5 * float(minor)) / max(1.0, float(denominator))
+    return _clip01(weighted), major, minor
 
 
 def _first_bullet_keywords(lines: Sequence[str]) -> List[str]:
@@ -192,7 +254,7 @@ def _rule_evaluate_answers(
 
     alt = str(explanation_object.get("comparison", {}).get("alternative", "")).strip().lower()
     q5 = _normalize(str(answers.get("Q5", "")))
-    if alt and alt not in q5:
+    if alt and ("모르겠습니다" not in q5) and alt not in q5:
         mis.append("Q5: 대안 상품군 비교 누락")
 
     return scores, mis
@@ -219,10 +281,22 @@ def _fallback_user_answers(
 
     # Parse rendered explanation text instead of directly copying ground truth
     # to avoid circularity in fallback mode.
-    reason_bullets = _extract_section_bullets(explanation, "추천 이유")
-    warning_bullets = _extract_section_bullets(explanation, "유의사항")
-    compare_bullets = _extract_section_bullets(explanation, "대안 비교")
-    summary_bullets = _extract_section_bullets(explanation, "한줄 요약")
+    reason_bullets = (
+        _extract_section_bullets(explanation, "왜 이 상품인가")
+        or _extract_section_bullets(explanation, "추천 이유")
+    )
+    warning_bullets = (
+        _extract_section_bullets(explanation, "꼭 알아둘 점")
+        or _extract_section_bullets(explanation, "유의사항")
+    )
+    compare_bullets = (
+        _extract_section_bullets(explanation, "대안과의 차이")
+        or _extract_section_bullets(explanation, "대안 비교")
+    )
+    summary_bullets = (
+        _extract_section_bullets(explanation, "한줄 정리")
+        or _extract_section_bullets(explanation, "한줄 요약")
+    )
 
     q1 = "안정적인 편 같습니다." if risk in {"낮음", "보통"} else "변동 위험이 있는 편 같습니다."
     q2 = reason_bullets[0] if reason_bullets else "모르겠습니다."
@@ -331,15 +405,25 @@ class ExplainerUnderstandingEvaluator:
         ground_truth: Dict[str, str],
         answers: Dict[str, str],
         explanation_object: Dict[str, Any],
-    ) -> Tuple[Dict[str, int], List[str]]:
+    ) -> Tuple[Dict[str, float], List[str], Dict[str, str]]:
+        reasons: Dict[str, str] = {}
         if self.answer_evaluator is not None:
             payload = {"ground_truth": ground_truth, "answers": answers}
             out = self.answer_evaluator.run_json(payload)
             if out:
-                scores = {f"Q{i}": int(out.get(f"Q{i}", 0)) for i in range(1, 6)}
+                scores = _normalize_scores_0_20(out)
                 mis = [str(x) for x in out.get("misinterpretations", []) if str(x).strip()]
-                return scores, mis
-        return _rule_evaluate_answers(explanation_object, answers)
+                raw_reasons = out.get("score_reasons", {}) if isinstance(out.get("score_reasons", {}), dict) else {}
+                for i in range(1, 6):
+                    k = f"Q{i}"
+                    reasons[k] = str(raw_reasons.get(k, "")).strip()
+                return scores, mis, reasons
+        rule_scores, rule_mis = _rule_evaluate_answers(explanation_object, answers)
+        scaled = {k: float(v) * 20.0 for k, v in rule_scores.items()}
+        for i in range(1, 6):
+            k = f"Q{i}"
+            reasons[k] = "rule_fallback"
+        return scaled, rule_mis, reasons
 
     def _quality_scores(
         self,
@@ -401,7 +485,7 @@ class ExplainerUnderstandingEvaluator:
         explanation_text = str(recommendation_item.get("rendered_explanation", ""))
         verification = recommendation_item.get("verification", {})
 
-        rec_payload = {
+        rec_payload_after = {
             "product_id": recommendation_item.get("product_id", ""),
             "score": recommendation_item.get("score", 0.0),
             "recommended_product": explanation_object.get("recommended_product", {}),
@@ -409,25 +493,37 @@ class ExplainerUnderstandingEvaluator:
             "comparison": explanation_object.get("comparison", {}),
             "warnings": explanation_object.get("warnings", []),
         }
+        # Before-explanation condition intentionally hides detail/comparison/warnings
+        # to reduce leakage-like ceiling effects in understanding gain measurement.
+        rec_payload_before = {
+            "product_id": recommendation_item.get("product_id", ""),
+            "score": recommendation_item.get("score", 0.0),
+            "recommended_product": explanation_object.get("recommended_product", {}),
+            "recommended_product_detail": {},
+            "comparison": {},
+            "warnings": [],
+        }
         ground_truth = build_ground_truth(explanation_object)
 
-        answers_before = self._simulate_answers(rec_payload, "", explanation_object)
-        answers_after = self._simulate_answers(rec_payload, explanation_text, explanation_object)
+        answers_before = self._simulate_answers(rec_payload_before, "", explanation_object)
+        answers_after = self._simulate_answers(rec_payload_after, explanation_text, explanation_object)
 
-        score_before, mis_before = self._score_answers(ground_truth, answers_before, explanation_object)
-        score_after, mis_after = self._score_answers(ground_truth, answers_after, explanation_object)
-        total_before = int(sum(score_before.values()))
-        total_after = int(sum(score_after.values()))
+        score_before, mis_before, score_reasons_before = self._score_answers(ground_truth, answers_before, explanation_object)
+        score_after, mis_after, score_reasons_after = self._score_answers(ground_truth, answers_after, explanation_object)
+        total_before = float(sum(score_before.values()))
+        total_after = float(sum(score_after.values()))
 
         quality = self._quality_scores(explanation_text, explanation_object, verification)
-        ug = float(total_after - total_before) / 5.0
-        mr = float(len(mis_after)) / 5.0
+        ug = float(total_after - total_before) / 100.0
+        mr_raw = float(len(mis_after)) / 5.0
+        mr_weighted, major_cnt, minor_cnt = _weighted_misinterpretation_rate(mis_after, denominator=5.0)
 
         return {
             "user_id": str(user_id),
             "product_id": str(recommendation_item.get("product_id", "")),
             "render_source": str(recommendation_item.get("render_source", "unknown")),
-            "recommendation_payload": rec_payload,
+            "recommendation_payload": rec_payload_after,
+            "recommendation_payload_before": rec_payload_before,
             "evaluation_prompts": {
                 "simulator_prompt": self.simulator_prompt,
                 "evaluator_prompt": self.evaluator_prompt,
@@ -438,6 +534,8 @@ class ExplainerUnderstandingEvaluator:
             "answers_after": answers_after,
             "scores_before": score_before,
             "scores_after": score_after,
+            "score_reasons_before": score_reasons_before,
+            "score_reasons_after": score_reasons_after,
             "total_before": total_before,
             "total_after": total_after,
             "misinterpretations_before": mis_before,
@@ -445,7 +543,11 @@ class ExplainerUnderstandingEvaluator:
             "quality_scores": quality,
             "effect_scores": {
                 "understanding_gain": ug,
-                "misinterpretation_rate": mr,
+                "misinterpretation_rate": mr_weighted,
+                "misinterpretation_rate_weighted": mr_weighted,
+                "misinterpretation_rate_raw": mr_raw,
+                "misinterpretation_major_count": int(major_cnt),
+                "misinterpretation_minor_count": int(minor_cnt),
             },
             "explanation_object": explanation_object,
             "rendered_explanation": explanation_text,
@@ -468,6 +570,9 @@ class ExplainerUnderstandingEvaluator:
             vals = [float(_dig(r, path, 0.0)) for r in records]
             return float(np.mean(vals)) if vals else 0.0
 
+        mean_total_before = mean("total_before")
+        mean_total_after = mean("total_after")
+
         return {
             "personalization": mean("quality_scores.personalization"),
             "product_grounding": mean("quality_scores.product_grounding"),
@@ -475,6 +580,13 @@ class ExplainerUnderstandingEvaluator:
             "compliance": mean("quality_scores.compliance"),
             "understanding_gain": mean("effect_scores.understanding_gain"),
             "misinterpretation_rate": mean("effect_scores.misinterpretation_rate"),
+            "misinterpretation_rate_weighted": mean("effect_scores.misinterpretation_rate_weighted"),
+            "misinterpretation_rate_raw": mean("effect_scores.misinterpretation_rate_raw"),
+            "mean_misinterpretation_major_count": mean("effect_scores.misinterpretation_major_count"),
+            "mean_misinterpretation_minor_count": mean("effect_scores.misinterpretation_minor_count"),
+            "mean_total_before_100": mean_total_before,
+            "mean_total_after_100": mean_total_after,
+            "mean_delta_total_100": mean_total_after - mean_total_before,
         }
 
 

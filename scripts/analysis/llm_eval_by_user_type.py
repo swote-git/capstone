@@ -52,6 +52,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--per-type", type=int, default=5, help="Number of users per user_type for LLM explanation calls")
     p.add_argument("--top-k", type=int, default=1)
     p.add_argument("--llm-model", type=str, default="gpt-5-mini", help="LLM renderer model")
+    p.add_argument("--use-explainer-moe", action="store_true")
+    p.add_argument(
+        "--compliance-rules-path",
+        type=Path,
+        default=Path("src/explainer/compliance_rules.txt"),
+    )
+    p.add_argument("--explainer-moe-debug", action="store_true")
     p.add_argument("--llm-score-model", type=str, default="gpt-5-mini", help="LLM evaluator model for 0~20 scoring")
     p.add_argument("--score-timeout", type=float, default=30.0)
     p.add_argument("--score-max-retries", type=int, default=2)
@@ -478,6 +485,9 @@ def main() -> None:
             k=args.top_k,
             llm_renderer=renderer,
             fallback_to_template_on_verify_fail=False,
+            use_explainer_moe=bool(args.use_explainer_moe),
+            compliance_rules_path=args.compliance_rules_path,
+            explainer_moe_debug=bool(args.explainer_moe_debug),
         )
         dt = float(time.time() - t0)
         print(f"[{i}/{total_users}] user={uid} type={utype} latency={dt:.2f}s", flush=True)

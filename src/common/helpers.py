@@ -192,3 +192,18 @@ def _ndcg_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> float:
     if idcg <= 0:
         return 0.0
     return dcg / idcg
+
+
+def _gini_coefficient(counts: np.ndarray) -> float:
+    """Measure concentration in recommendation exposure.
+
+    0 means exposure is evenly distributed across items. Values closer to 1
+    mean recommendations are concentrated on a small number of items.
+    """
+    counts = np.asarray(counts, dtype=float)
+    if counts.size == 0 or float(np.sum(counts)) <= 0:
+        return 0.0
+    sorted_counts = np.sort(counts)
+    n = len(sorted_counts)
+    index = np.arange(1, n + 1)
+    return float(np.sum((2 * index - n - 1) * sorted_counts) / (n * np.sum(sorted_counts)))

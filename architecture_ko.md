@@ -14,6 +14,7 @@
   -> [Candidate Generation]
   -> [User-Item Pair Features]
   -> [Baseline + LGBMRanker]
+  -> [MoE Harness (선택): ranker/baseline/utility 전문가 게이팅]
   -> [Top-K Recommendation]
   -> [Reason Extractor]
   -> [Explanation Object]
@@ -34,6 +35,7 @@ src/
 
   recommender/
     engine.py             # ThinFilerRecommender 핵심
+    moe_harness.py        # MoE 라우터 + 전문가 점수 결합
 
   explainer/
     service.py            # GroundedExplainer 오케스트레이션

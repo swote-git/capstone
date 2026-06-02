@@ -21,14 +21,24 @@ class RecommenderConfig:
     # "all" | "deposit" | "fund"
     recommender_family: str = "all"
 
-    # TPS v2.0 가중치 설정 (사용자 정의)
+    # TPS v2.1 가중치 설정: 신뢰도 중심 보조 지표
     tps_weights: Dict[str, float] = field(
         default_factory=lambda: {
-            "trust": 0.4,
-            "activity": 0.3,
-            "potential": 0.3
+            "trust": 0.7,
+            "activity": 0.15,
+            "potential": 0.15,
         }
     )
+    trust_overdue_weight: float = 10.0
+    trust_inst_weight: float = 1.0
+    activity_amt_weight: float = 0.2
+    activity_cnt_weight: float = 0.4
+    activity_digi_weight: float = 0.4
+    potential_income_weight: float = 0.3
+    potential_cb_weight: float = 0.4
+    potential_tel_weight: float = 0.1
+    potential_youth_weight: float = 0.2
+    table11_nrows_per_file: int | None = None
     # 실험적 heuristic ID bridge는 기본 비활성화 (데이터 무결성 보호)
     enable_heuristic_id_bridge: bool = False
 
@@ -40,6 +50,9 @@ class RecommenderConfig:
 
     risk_threshold: float = 1.25
     investment_asset_threshold: float = 2_000_000.0
+    enable_deposit_eligibility_filter: bool = True
+    deposit_cluster_cap_topk: int = 1
+    deposit_bank_cap_topk: int = 1
 
     baseline_weights: Dict[str, float] = field(
         default_factory=lambda: {
@@ -55,10 +68,27 @@ class RecommenderConfig:
         default_factory=lambda: {
             "objective": "lambdarank",
             "metric": "ndcg",
-            "n_estimators": 200,
-            "learning_rate": 0.05,
-            "num_leaves": 64,
+            "eval_at": [5],
+            "lambdarank_truncation_level": 5,
+            "label_gain": [0, 1, 3, 15],
+            "n_estimators": 500,
+            "learning_rate": 0.02,
+            "num_leaves": 128,
             "random_state": 42,
             "verbose": -1,
         }
     )
+
+    # Optional MoE harness over scoring experts (ranker/baseline/utility).
+    use_moe_harness: bool = False
+    moe_debug: bool = False
+    moe_default_weights: Dict[str, float] = field(
+        default_factory=lambda: {
+            "ranker": 0.60,
+            "baseline": 0.25,
+            "utility": 0.15,
+        }
+    )
+    moe_deposit_baseline_boost: float = 0.05
+    moe_fund_utility_boost: float = 0.10
+    moe_low_risk_fund_penalty: float = 0.15

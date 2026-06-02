@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import math
 import pickle
+import re
+import hashlib
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,6 +18,7 @@ from common.helpers import (
     TRAIN_FEATURE_COLUMNS,
     _bucket_amount,
     _clip01,
+    _gini_coefficient,
     _lagged_cb_ym,
     _ndcg_at_k,
     _parse_amount_bin,
@@ -25,6 +28,7 @@ from common.helpers import (
     _to_numeric,
     _ym_to_quarter,
 )
+from recommender.moe_harness import MoEHarness
 
 try:
     from lightgbm import LGBMRanker
@@ -46,6 +50,9 @@ class ThinFilerRecommender:
         self.user_snapshots: Optional[pd.DataFrame] = None
         self.last_join_report: Optional[Dict[str, float]] = None
         self.cb_join_available: bool = True
+        self.product_source_lookup: Dict[str, Dict[str, Any]] = {}
+        self.product_schema_info: Dict[str, Any] = {}
+        self.moe_harness: Optional[MoEHarness] = MoEHarness() if self.config.use_moe_harness else None
 
     @property
     def _table11_path(self) -> Path:
@@ -64,7 +71,32 @@ class ThinFilerRecommender:
         frames: List[pd.DataFrame] = []
         for csv_path in sorted(self._table11_path.glob("*.csv")):
             ym = _parse_ym_from_filename(csv_path)
-            df = _read_csv_selected(csv_path, needed_cols)
+            nrows = getattr(self.config, "table11_nrows_per_file", None)
+            if nrows:
+                try:
+                    header = pd.read_csv(csv_path, nrows=0, encoding="utf-8")
+                    usecols = [c for c in needed_cols if c in header.columns]
+                    df = pd.read_csv(
+                        csv_path,
+                        usecols=usecols,
+                        dtype=str,
+                        nrows=int(nrows),
+                        low_memory=False,
+                        encoding="utf-8",
+                    )
+                except UnicodeDecodeError:
+                    header = pd.read_csv(csv_path, nrows=0, encoding="cp949")
+                    usecols = [c for c in needed_cols if c in header.columns]
+                    df = pd.read_csv(
+                        csv_path,
+                        usecols=usecols,
+                        dtype=str,
+                        nrows=int(nrows),
+                        low_memory=False,
+                        encoding="cp949",
+                    )
+            else:
+                df = _read_csv_selected(csv_path, needed_cols)
             meta = pd.DataFrame(
                 {
                     "anchor_ym": np.full(len(df), ym, dtype=np.int64),
@@ -98,6 +130,7 @@ class ThinFilerRecommender:
     def _load_and_normalize_products(self) -> pd.DataFrame:
         deposit_path = self._table12_path / "은행수신상품.csv"
         fund_path = self._table12_path / "공모펀드상품.csv"
+        schema_path = self._table12_path / "12금융상품정보.xlsx"
 
         def _read_csv_safe(path):
             try:
@@ -110,11 +143,123 @@ class ThinFilerRecommender:
         dep = _read_csv_safe(deposit_path)
         fund = _read_csv_safe(fund_path)
 
+        def _load_table12_schema_info(path: Path) -> Dict[str, Any]:
+            out: Dict[str, Any] = {
+                "loaded": False,
+                "path": str(path),
+                "deposit_columns": [],
+                "fund_columns": [],
+                "deposit_hard_constraint_columns": [],
+            }
+            if not path.exists():
+                return out
+            try:
+                raw = pd.read_excel(path, header=None)
+                if raw.shape[1] < 3:
+                    return out
+                m = raw.rename(columns={1: "table_name", 2: "column_name"}).copy()
+                m = m.dropna(subset=["table_name", "column_name"])
+                m["table_name"] = m["table_name"].astype(str).str.strip()
+                m["column_name"] = m["column_name"].astype(str).str.strip()
+
+                dep_cols = m[m["table_name"] == "은행수신상품"]["column_name"].tolist()
+                fund_cols = m[m["table_name"] == "공모펀드상품"]["column_name"].tolist()
+
+                hard_candidates = [
+                    "가입대상고객_조건",
+                    "가입제한_조건",
+                    "기타_상품가입_고려사항",
+                ]
+                hard_cols = [c for c in hard_candidates if c in dep_cols]
+
+                out.update(
+                    {
+                        "loaded": True,
+                        "deposit_columns": dep_cols,
+                        "fund_columns": fund_cols,
+                        "deposit_hard_constraint_columns": hard_cols,
+                    }
+                )
+                return out
+            except Exception:
+                return out
+
+        self.product_schema_info = _load_table12_schema_info(schema_path)
+
+        def _to_jsonable(value: Any) -> Any:
+            if value is None:
+                return None
+            try:
+                if pd.isna(value):
+                    return None
+            except Exception:
+                pass
+            if isinstance(value, (np.integer,)):
+                return int(value)
+            if isinstance(value, (np.floating,)):
+                return float(value)
+            if isinstance(value, (np.bool_,)):
+                return bool(value)
+            return value
+
+        def _build_source_lookup(
+            df: pd.DataFrame,
+            id_col: str,
+            family: str,
+            preferred_cols: List[str],
+        ) -> Dict[str, Dict[str, Any]]:
+            keep_cols: List[str] = []
+            seen = {id_col}
+            for col in preferred_cols:
+                if col in df.columns and col not in seen:
+                    keep_cols.append(col)
+                    seen.add(col)
+            if id_col not in df.columns:
+                return {}
+
+            view = df[[id_col] + keep_cols].copy()
+            lookup: Dict[str, Dict[str, Any]] = {}
+            for record in view.to_dict(orient="records"):
+                pid = str(record.get(id_col, ""))
+                if not pid:
+                    continue
+                payload = {
+                    k: _to_jsonable(v)
+                    for k, v in record.items()
+                    if k != id_col
+                }
+                payload["product_family"] = family
+                lookup[pid] = payload
+            return lookup
+
+        target_flag = dep.get("가입대상고객_조건여부", "").fillna("").astype(str).str.strip()
+        target_text_raw = dep.get("가입대상고객_조건", "").fillna("").astype(str)
+        target_text = np.where(target_flag.isin(["있음", "Y", "y", "1"]), target_text_raw, "")
+
+        limit_flag = dep.get("가입제한_조건여부", "").fillna("").astype(str).str.strip()
+        limit_text_raw = dep.get("가입제한_조건", "").fillna("").astype(str)
+        limit_text = np.where(limit_flag.isin(["있음", "Y", "y", "1"]), limit_text_raw, "")
+
+        note_text = dep.get("기타_상품가입_고려사항", "").fillna("").astype(str)
+        hard_cols = self.product_schema_info.get("deposit_hard_constraint_columns", [])
+        if hard_cols:
+            hard_parts = [dep.get(c, "").fillna("").astype(str) for c in hard_cols if c in dep.columns]
+        else:
+            hard_parts = [pd.Series(target_text, index=dep.index), pd.Series(limit_text, index=dep.index), note_text]
+        if hard_parts:
+            hard_text = hard_parts[0]
+            for p in hard_parts[1:]:
+                hard_text = (hard_text + " " + p).astype(str)
+            hard_text = hard_text.str.replace(r"\s+", " ", regex=True).str.strip()
+        else:
+            hard_text = pd.Series("", index=dep.index)
+
         dep_norm = pd.DataFrame(
             {
                 "product_id": dep.get("상품코드", dep.index.astype(str)).astype(str),
                 "product_name": dep.get("상품명", "deposit").astype(str),
                 "product_family": "deposit",
+                "bank_code": dep.get("은행코드", "").fillna("").astype(str).str.strip(),
                 "risk_level": 0,
                 "liquidity_level": np.where(
                     dep.get("만기여부", "").astype(str).str.contains("만기 없음", na=False),
@@ -140,6 +285,17 @@ class ThinFilerRecommender:
                 "fee_level": 0,
                 "principal_variation": 0,
                 "max_rate": pd.to_numeric(dep.get("최대우대금리", 0), errors="coerce").fillna(0.0),
+                "eligibility_target_text": pd.Series(target_text, index=dep.index).astype(str),
+                "eligibility_limit_text": pd.Series(limit_text, index=dep.index).astype(str),
+                "eligibility_note_text": note_text,
+                "eligibility_hard_text": hard_text,
+                "deposit_cluster_key": (
+                    dep.get("상품그룹코드", "").fillna("UNK").astype(str).str.strip()
+                    + "|"
+                    + dep.get("예금입출금방식", "").fillna("UNK").astype(str).str.strip()
+                    + "|"
+                    + dep.get("만기여부", "").fillna("UNK").astype(str).str.strip()
+                ),
             }
         )
 
@@ -190,6 +346,94 @@ class ThinFilerRecommender:
         all_products["complexity"] = all_products["complexity"].clip(0, 2).astype("int64")
         all_products["min_amount_bin"] = all_products["min_amount_bin"].clip(0, 3).astype("int64")
         all_products["horizon_code"] = all_products["horizon"].map({"short": 0, "mid": 1, "long": 2}).fillna(1)
+        all_products["eligibility_target_text"] = all_products.get("eligibility_target_text", "").fillna("").astype(str)
+        all_products["eligibility_limit_text"] = all_products.get("eligibility_limit_text", "").fillna("").astype(str)
+        all_products["eligibility_note_text"] = all_products.get("eligibility_note_text", "").fillna("").astype(str)
+        all_products["eligibility_hard_text"] = all_products.get("eligibility_hard_text", "").fillna("").astype(str)
+        all_products["deposit_cluster_key"] = all_products.get("deposit_cluster_key", "").fillna("").astype(str)
+        all_products["bank_code"] = all_products.get("bank_code", "").fillna("").astype(str)
+
+        deposit_source_cols = [
+            "은행코드",
+            "은행명",
+            "상품코드",
+            "상품명",
+            "상품일련번호",
+            "상품그룹코드",
+            "상품그룹명",
+            "예금입출금방식",
+            "만기여부",
+            "이자지급방법",
+            "이자계산방법",
+            "가입대상고객_조건",
+            "가입제한_조건",
+            "기본금리",
+            "최대우대금리",
+            "우대금리조건_개수",
+            "예금자보호대상여부",
+            "세제혜택_비과세종합저축_여부",
+            "가입금액_최소구간",
+            "가입금액_최대구간",
+            "계약기간개월수_최소구간",
+            "계약기간개월수_최대구간",
+            "신규채널",
+            "해지채널",
+            "상품개요_설명",
+            "기타_상품가입_고려사항",
+        ]
+        fund_source_cols = [
+            "평가기준일",
+            "펀드코드",
+            "펀드명",
+            "설정일",
+            "운용사코드",
+            "운용사명",
+            "대유형",
+            "중유형",
+            "소유형",
+            "유형BM",
+            "펀드키워드",
+            "투자전략",
+            "설정액",
+            "순자산",
+            "패밀리설정액",
+            "패밀리순자산",
+            "1년종합등급",
+            "3년종합등급",
+            "5년종합등급",
+            "투자위험등급",
+            "판매위험등급",
+            "펀드성과정보_1개월",
+            "펀드성과정보_3개월",
+            "펀드성과정보_6개월",
+            "펀드성과정보_1년",
+            "펀드표준편차_1년",
+            "펀드수정샤프_1년",
+            "MaximumDrawDown_1년",
+            "운용보수",
+            "수탁보수",
+            "사무관리보수",
+            "판매보수",
+            "선취수수료",
+            "후취수수료",
+            "고난도금융상품",
+            "레버리지",
+            "ESG(사회책임투자형)",
+            "절대수익추구",
+        ]
+        dep_lookup = _build_source_lookup(
+            dep,
+            id_col="상품코드",
+            family="deposit",
+            preferred_cols=deposit_source_cols,
+        )
+        fund_lookup = _build_source_lookup(
+            fund,
+            id_col="펀드코드",
+            family="fund",
+            preferred_cols=fund_source_cols,
+        )
+        self.product_source_lookup = {**dep_lookup, **fund_lookup}
         return all_products
 
     def _heuristic_id_bridge(self, t11_users: pd.Series, t09_users: pd.Series) -> Dict[str, str]:
@@ -494,12 +738,20 @@ class ThinFilerRecommender:
         component = self._build_user_component_features(df)
         preference = self._build_user_preference_features(df, component)
         
-        # --- TPS (Thin-Filer Potential Score) v2.0 Calculation (Refined by User Source) ---
-        # 1. Trust Score (S_Trust) - 40% (Sources: 04, 09)
+        # --- TPS (Thin-Filer Potential Score) v2.1 ---
+        # TPS is a supplementary user signal. It should not override suitability,
+        # eligibility, or product-family specific utility.
         cb_score = _safe_col(df, "CB_SCORE", _safe_col(df, "PYE_C1M210000", 700)).fillna(700)
         overdue = _safe_col(df, "OVERDUE_CNT", _safe_col(df, "PYE_MAX_DLQ_DAY", 0)).fillna(0)
         inst_rt = _safe_col(df, "INST_CNT_RT", _safe_col(df, "PYE_C18233003", 0)).fillna(0)
-        s_trust = (100.0 - (overdue * 30.0) - (inst_rt * 5.0)).clip(0, 100)
+
+        s_trust_base = (
+            100.0
+            - (overdue * self.config.trust_overdue_weight)
+            - (inst_rt * self.config.trust_inst_weight)
+        ).clip(0, 100)
+        tel_consistency = component["telecom_payment_consistency"].fillna(0.5).clip(0, 1)
+        s_trust = (s_trust_base * 0.8) + (tel_consistency * 20.0)
         
         # 2. Activity Score (S_Activity) - 30% (Sources: 03, 06)
         spending_amt = _safe_col(df, "TOTAL_SPENDING", _safe_col(df, "CD_USE_AMT", 0)).fillna(0)
@@ -510,7 +762,11 @@ class ThinFilerRecommender:
             amt_pct = spending_amt.rank(pct=True) * 100.0
             cnt_pct = spending_cnt.rank(pct=True) * 100.0
             digi_pct = e_pay_cnt.rank(pct=True) * 100.0
-            s_activity = (amt_pct * 0.3 + cnt_pct * 0.4 + digi_pct * 0.3)
+            s_activity = (
+                amt_pct * self.config.activity_amt_weight
+                + cnt_pct * self.config.activity_cnt_weight
+                + digi_pct * self.config.activity_digi_weight
+            )
         else:
             s_activity = pd.Series(50.0, index=df.index)
         
@@ -526,13 +782,22 @@ class ThinFilerRecommender:
             income_pct = pd.Series(50.0, index=df.index)
             cb_pct = pd.Series(50.0, index=df.index)
             
-        tel_score = (tel_grade * 33.3).clip(0, 100) # Grade 1->33.3, 3->100
+        tel_score = (tel_grade * 33.3).clip(0, 100)
         youth_bonus = np.where(age <= 35, 100.0, 0.0)
-        
-        s_potential = (income_pct * 0.2 + cb_pct * 0.2 + tel_score * 0.3 + youth_bonus * 0.3)
-        
-        # Final TPS Weighted Sum
-        tps = (s_trust * 0.4) + (s_activity * 0.3) + (s_potential * 0.3)
+
+        s_potential = (
+            income_pct * self.config.potential_income_weight
+            + cb_pct * self.config.potential_cb_weight
+            + tel_score * self.config.potential_tel_weight
+            + youth_bonus * self.config.potential_youth_weight
+        )
+
+        w = self.config.tps_weights
+        tps = (
+            s_trust * w.get("trust", 0.7)
+            + s_activity * w.get("activity", 0.15)
+            + s_potential * w.get("potential", 0.15)
+        )
         
         tps_features = pd.DataFrame({
             "tps_score": tps,
@@ -542,7 +807,8 @@ class ThinFilerRecommender:
         }, index=df.index)
         
         engineered = pd.concat([component, preference, tps_features], axis=1, copy=False)
-        return pd.concat([df.copy(), engineered], axis=1, copy=False)
+        df_clean = df.drop(columns=[c for c in engineered.columns if c in df.columns], errors="ignore")
+        return pd.concat([df_clean, engineered], axis=1, copy=False)
 
     def recommend_new_user(self, user_dict: Dict, k: Optional[int] = None) -> Dict:
         """Interface for real-time recommendation for a new user (dict input)"""
@@ -570,6 +836,200 @@ class ThinFilerRecommender:
             raise ValueError(f"No products available for recommender_family={family!r}")
         return filtered
 
+    @staticmethod
+    def _infer_user_age(user_row: pd.Series) -> float:
+        age_raw = user_row.get("AGE", np.nan)
+        age = pd.to_numeric(pd.Series([age_raw]), errors="coerce").iloc[0]
+        if not pd.isna(age):
+            return float(age)
+        age_gb = str(user_row.get("AGE_GB", "")).strip()
+        m = re.search(r"(\d{2})\s*대", age_gb)
+        if m:
+            return float(int(m.group(1)) + 5)
+        return 30.0
+
+    @staticmethod
+    def _extract_age_bounds(text: str) -> Tuple[Optional[int], Optional[int]]:
+        age_min: Optional[int] = None
+        age_max: Optional[int] = None
+        if not text:
+            return age_min, age_max
+
+        for n1, n2 in re.findall(r"만\s*(\d+)\s*세\s*[~\-]\s*만?\s*(\d+)\s*세", text):
+            a, b = int(n1), int(n2)
+            lo, hi = min(a, b), max(a, b)
+            age_min = lo if age_min is None else max(age_min, lo)
+            age_max = hi if age_max is None else min(age_max, hi)
+
+        for n, op in re.findall(r"만\s*(\d+)\s*세\s*(이상|이하|미만|초과|이내)", text):
+            age = int(n)
+            if op == "이상":
+                age_min = age if age_min is None else max(age_min, age)
+            elif op == "초과":
+                age_min = age + 1 if age_min is None else max(age_min, age + 1)
+            elif op in {"이하", "이내"}:
+                age_max = age if age_max is None else min(age_max, age)
+            elif op == "미만":
+                age_max = age - 1 if age_max is None else min(age_max, age - 1)
+        return age_min, age_max
+
+    @staticmethod
+    def _user_flag(user_row: pd.Series, keys: Sequence[str]) -> bool:
+        true_tokens = {"y", "yes", "true", "1", "예", "있음"}
+        for key in keys:
+            if key not in user_row:
+                continue
+            v = user_row.get(key)
+            if isinstance(v, str):
+                if v.strip().lower() in true_tokens:
+                    return True
+            try:
+                n = float(v)
+                if not math.isnan(n) and n > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _apply_deposit_eligibility_filter(self, items: pd.DataFrame, user_row: pd.Series) -> pd.DataFrame:
+        if items.empty:
+            return items
+        if not bool(getattr(self.config, "enable_deposit_eligibility_filter", True)):
+            return items
+        if "product_family" not in items.columns:
+            return items
+
+        dep_mask = items["product_family"].eq("deposit")
+        if not dep_mask.any():
+            return items
+
+        age = self._infer_user_age(user_row)
+        is_senior = age >= 65.0
+        has_child = self._user_flag(user_row, ["HAS_CHILD", "IS_PARENT", "CHILDREN_COUNT"])
+        is_military = self._user_flag(user_row, ["IS_MILITARY", "MILITARY_SERVICE"])
+        is_farmer = self._user_flag(user_row, ["IS_FARMER", "IS_FISHER"])
+        is_vulnerable = self._user_flag(
+            user_row,
+            ["IS_MICROFINANCE", "IS_WELFARE", "IS_LOW_INCOME", "IS_JOB_INCENTIVE_RECIPIENT"],
+        )
+        is_foreigner = self._user_flag(user_row, ["IS_FOREIGNER"])
+        is_business_user = self._user_flag(user_row, ["IS_BUSINESS", "IS_SOLE_PROPRIETOR", "HAS_BUSINESS_LICENSE"])
+        has_program_approval = self._user_flag(user_row, ["HAS_PROGRAM_APPROVAL", "HAS_RECOMMENDATION_DOC"])
+        has_local_residency_match = self._user_flag(user_row, ["HAS_LOCAL_RESIDENCY_MATCH", "IS_LOCAL_RESIDENT"])
+
+        strict_patterns = [
+            (r"미소금융|서민금융진흥원|자산형성상품\s*참여\s*추천서|근로장려|기초생활|차상위", is_vulnerable),
+            (r"군인|장병|군복무|병역", is_military),
+            (r"농어민|농업인|어업인", is_farmer),
+            (r"자녀를\s*둔\s*부모|임산부", has_child),
+            (r"만\s*65\s*세\s*이상|시니어|어르신", is_senior),
+            (r"가입승인|승인\s*통보|추천을\s*받은|제출서류|발급한", has_program_approval),
+            (r"[가-힣]+[시군구]\s*거주|도민", has_local_residency_match),
+        ]
+
+        keep = pd.Series(True, index=items.index)
+        dep = items[dep_mask]
+        for idx, row in dep.iterrows():
+            text = str(row.get("eligibility_hard_text", "")).strip()
+            if not text:
+                text = " ".join(
+                    [
+                        str(row.get("eligibility_target_text", "")),
+                        str(row.get("eligibility_limit_text", "")),
+                        str(row.get("eligibility_note_text", "")),
+                    ]
+                )
+            text = re.sub(r"\s+", " ", text).strip()
+            if not text:
+                continue
+
+            age_min, age_max = self._extract_age_bounds(text)
+            if age_min is not None and age < age_min:
+                keep.loc[idx] = False
+                continue
+            if age_max is not None and age > age_max:
+                keep.loc[idx] = False
+                continue
+
+            # Foreign-only conditions are treated as strict when no 내국인 alternative is present.
+            if re.search(r"외국인", text) and not re.search(r"내국인|국민인\s*거주자|실명의\s*개인", text):
+                if not is_foreigner:
+                    keep.loc[idx] = False
+                    continue
+
+            # Exclude business-only products when user business eligibility is unknown/false.
+            if re.search(r"개인사업자|법인", text):
+                has_personal_alternative = re.search(r"실명의\s*개인|개인고객|개인\s*\(", text) is not None
+                if (not has_personal_alternative) and (not is_business_user):
+                    keep.loc[idx] = False
+                    continue
+
+            for pat, allowed in strict_patterns:
+                if re.search(pat, text):
+                    if not allowed:
+                        keep.loc[idx] = False
+                    break
+
+        filtered = items[keep].copy()
+        if filtered.empty:
+            return items
+        return filtered
+
+    def _diversify_ranked_topk(self, ranked: pd.DataFrame, k: int) -> pd.DataFrame:
+        if ranked.empty:
+            return ranked
+        cluster_cap = int(max(1, getattr(self.config, "deposit_cluster_cap_topk", 1)))
+        bank_cap = int(max(1, getattr(self.config, "deposit_bank_cap_topk", 1)))
+        if (cluster_cap <= 0 and bank_cap <= 0) or "product_family" not in ranked.columns:
+            return ranked.head(k)
+
+        chosen: List[int] = []
+        chosen_set = set()
+
+        def pick_with_limits(use_cluster_limit: bool, use_bank_limit: bool) -> None:
+            dep_cluster_count: Dict[str, int] = {}
+            dep_bank_count: Dict[str, int] = {}
+            for idx in ranked.index:
+                if len(chosen) >= k:
+                    break
+                if idx in chosen_set:
+                    continue
+                row = ranked.loc[idx]
+                if str(row.get("product_family", "")) != "deposit":
+                    chosen.append(idx)
+                    chosen_set.add(idx)
+                    continue
+
+                cluster_key = str(row.get("deposit_cluster_key", "")).strip()
+                cluster_key = re.sub(r"\s+", "", cluster_key) or f"deposit::{row.get('product_id')}"
+                bank_key = str(row.get("bank_code", "")).strip() or "UNKNOWN_BANK"
+
+                if use_cluster_limit and dep_cluster_count.get(cluster_key, 0) >= cluster_cap:
+                    continue
+                if use_bank_limit and dep_bank_count.get(bank_key, 0) >= bank_cap:
+                    continue
+
+                dep_cluster_count[cluster_key] = dep_cluster_count.get(cluster_key, 0) + 1
+                dep_bank_count[bank_key] = dep_bank_count.get(bank_key, 0) + 1
+                chosen.append(idx)
+                chosen_set.add(idx)
+
+        # pass 1: strict cluster + bank diversity
+        pick_with_limits(use_cluster_limit=True, use_bank_limit=True)
+        # pass 2: keep bank diversity, relax cluster
+        if len(chosen) < k:
+            pick_with_limits(use_cluster_limit=False, use_bank_limit=True)
+        # pass 3: final fill
+        if len(chosen) < k:
+            for idx in ranked.index:
+                if len(chosen) >= k:
+                    break
+                if idx in chosen_set:
+                    continue
+                chosen.append(idx)
+                chosen_set.add(idx)
+        return ranked.loc[chosen]
+
     def generate_candidates(self, user_row: pd.Series, max_candidates: Optional[int] = None) -> pd.DataFrame:
         if self.products is None:
             self.load_products()
@@ -581,6 +1041,7 @@ class ThinFilerRecommender:
 
         risk_tol = float(user_row.get("risk_tol", 1.0))
         investment_possible = int(user_row.get("investment_possible", 0))
+        tps_score = float(user_row.get("tps_score", 50.0))
 
         if risk_tol < self.config.risk_threshold:
             seed = products[(products["product_family"] == "deposit") | (products["risk_level"] <= 1)]
@@ -588,7 +1049,8 @@ class ThinFilerRecommender:
             seed = products[products["risk_level"] <= min(3, int(math.ceil(risk_tol + 1)))]
 
         if investment_possible:
-            safe_funds = products[(products["product_family"] == "fund") & (products["risk_level"] <= 2)]
+            max_fund_risk = 2 if tps_score < 70 else 3
+            safe_funds = products[(products["product_family"] == "fund") & (products["risk_level"] <= max_fund_risk)]
             seed = pd.concat([seed, safe_funds], ignore_index=True).drop_duplicates("product_id")
 
         liquidity_need = float(user_row.get("liquidity_need", 1.0))
@@ -601,18 +1063,31 @@ class ThinFilerRecommender:
 
         if filtered.empty:
             filtered = seed.copy()
+        filtered = self._apply_deposit_eligibility_filter(filtered, user_row)
+        if filtered.empty:
+            filtered = self._apply_deposit_eligibility_filter(seed.copy(), user_row)
 
         scored = self._add_pair_features(pd.DataFrame([user_row]), filtered)
-        scored["tie_break"] = scored["product_id"].astype(str).map(lambda x: (hash(x) % 1000) / 1000.0)
+        u_id = str(user_row.get(self.config.user_key_11, "unknown"))
+        scored["tie_break"] = scored["product_id"].astype(str).map(
+            lambda x: (
+                int(hashlib.md5(f"{x}::{u_id}".encode()).hexdigest()[:8], 16) % 1000
+            )
+            / 1000.0
+        )
+        scored["exploration_bonus"] = scored["tie_break"] * 2.0
+        scored["diversity_score"] = scored["baseline_score"] + scored["exploration_bonus"]
         scored = scored.sort_values(
-            ["baseline_score", "max_rate", "tie_break"],
+            ["diversity_score", "tie_break", "max_rate"],
             ascending=[False, False, False],
         )
 
         top = scored.head(max_candidates)[item_cols]
 
         if len(top) < self.config.candidate_min:
-            extra = products[~products["product_id"].isin(top["product_id"])].head(
+            extra_pool = products[~products["product_id"].isin(top["product_id"])].copy()
+            extra_pool = self._apply_deposit_eligibility_filter(extra_pool, user_row)
+            extra = extra_pool.head(
                 self.config.candidate_min - len(top)
             )
             top = pd.concat([top, extra], ignore_index=True)
@@ -662,16 +1137,25 @@ class ThinFilerRecommender:
         return pair
 
     def _build_labels(self, pair: pd.DataFrame) -> pd.Series:
-        max_rate = pd.to_numeric(pair.get("max_rate", 0), errors="coerce").fillna(0.0)
-        rate_norm = max_rate.rank(method="average", pct=True).astype(float)
+        import hashlib
+
+        uid = pair[self.config.user_key_11].iloc[0] if self.config.user_key_11 in pair.columns else "default"
+        seed = int(hashlib.md5(str(uid).encode()).hexdigest()[:8], 16) % (2**32)
+        rng = np.random.default_rng(seed)
+        random_noise = rng.normal(0, 0.2, size=len(pair))
+
+        interaction = (
+            pair["risk_match"] * pair["horizon_match"] * 0.25
+            + pair["liquidity_match"] * (1.0 - pair["risk_level"] / 4.0) * 0.2
+        )
         utility = (
             0.30 * pair["risk_match"]
-            + 0.25 * pair["liquidity_match"]
-            + 0.20 * pair["horizon_match"]
+            + 0.20 * pair["liquidity_match"]
+            + 0.15 * pair["horizon_match"]
             + 0.10 * pair["complexity_match"]
-            + 0.05 * pair["amount_feasibility"]
-            + 0.05 * pair["family_match"]
-            + 0.05 * rate_norm
+            + 0.10 * pair["family_match"]
+            + interaction
+            + random_noise
         )
 
         n = len(utility)
@@ -679,9 +1163,9 @@ class ThinFilerRecommender:
             labels = np.where(utility >= utility.median(), 2, 1)
             return pd.Series(labels, index=pair.index, dtype="int64")
 
-        q80, q55, q30 = utility.quantile([0.80, 0.55, 0.30]).tolist()
+        rank_pct = utility.rank(method="average", pct=True)
         labels = np.select(
-            [utility >= q80, utility >= q55, utility >= q30],
+            [rank_pct >= 0.95, rank_pct >= 0.80, rank_pct >= 0.50],
             [3, 2, 1],
             default=0,
         )
@@ -738,27 +1222,75 @@ class ThinFilerRecommender:
         self.model = LGBMRanker(**self.config.ranker_params)
         self.model.fit(X, y, group=group)
 
+    def score_pairs(
+        self,
+        user_snapshot: pd.Series,
+        pair: pd.DataFrame,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Unified scoring entrypoint.
+
+        Returns:
+        - scores: ndarray
+        - debug: scoring metadata for diagnostics
+        """
+        if bool(self.config.use_moe_harness):
+            if self.moe_harness is None:
+                self.moe_harness = MoEHarness()
+            moe_result = self.moe_harness.score_pair(self, user_snapshot, pair)
+            return moe_result.final_scores, {
+                "score_model": "moe_harness",
+                **moe_result.to_debug_dict(),
+            }
+
+        if self.model is not None and self.feature_columns:
+            scores = self.model.predict(pair[self.feature_columns].fillna(0.0))
+            debug_model = "lgbm_ranker"
+        else:
+            scores = pair["baseline_score"].to_numpy()
+            debug_model = "baseline"
+
+        u_id = str(user_snapshot.get(self.config.user_key_11, "unknown"))
+        ui_noise = pair["product_id"].astype(str).map(
+            lambda pid: (
+                int(hashlib.md5(f"{pid}::{u_id}".encode()).hexdigest()[:8], 16) % 100
+            )
+            / 1000.0
+        ).to_numpy()
+        scores = scores + ui_noise
+        if "tps_score" in user_snapshot.index:
+            try:
+                scores = scores + (0.1 * (float(user_snapshot["tps_score"]) / 100.0))
+            except Exception:
+                pass
+        return scores, {
+            "score_model": debug_model,
+        }
+
     def recommend(self, user_snapshot: pd.Series, k: Optional[int] = None) -> Dict[str, object]:
         k = k or self.config.top_k
         candidates = self.generate_candidates(user_snapshot)
         pair = self._add_pair_features(pd.DataFrame([user_snapshot]), candidates)
-
-        if self.model is not None and self.feature_columns:
-            scores = self.model.predict(pair[self.feature_columns].fillna(0.0))
-        else:
-            scores = pair["baseline_score"].to_numpy()
+        scores, score_debug = self.score_pairs(user_snapshot, pair)
 
         pair = pair.copy()
         pair["score"] = scores
-        ranked = pair.sort_values("score", ascending=False).head(k)
+        ranked = pair.sort_values("score", ascending=False)
+        ranked = self._diversify_ranked_topk(ranked, k=k)
 
-        return {
+        out: Dict[str, Any] = {
             "user_id": str(user_snapshot[self.config.user_key_11]),
             "recommendations": [
                 {"product_id": str(r.product_id), "score": float(r.score)}
                 for r in ranked[["product_id", "score"]].itertuples(index=False)
             ],
         }
+        if self.config.use_moe_harness:
+            out["score_model"] = "moe_harness"
+            if self.config.moe_debug:
+                out["moe_debug"] = score_debug
+        else:
+            out["score_model"] = score_debug.get("score_model", "baseline")
+        return out
 
     def batch_recommend(self, snapshots: pd.DataFrame, k: Optional[int] = None) -> List[Dict[str, object]]:
         return [self.recommend(row, k=k) for _, row in snapshots.iterrows()]
@@ -776,6 +1308,9 @@ class ThinFilerRecommender:
         k: Optional[int] = None,
         llm_renderer: Optional[object] = None,
         fallback_to_template_on_verify_fail: bool = True,
+        use_explainer_moe: bool = False,
+        compliance_rules_path: Optional[Path] = None,
+        explainer_moe_debug: bool = False,
     ) -> Dict[str, object]:
         from explainer.service import GroundedExplainer
 
@@ -784,6 +1319,9 @@ class ThinFilerRecommender:
             self,
             llm_renderer=llm_renderer,
             fallback_to_template_on_verify_fail=fallback_to_template_on_verify_fail,
+            use_explainer_moe=use_explainer_moe,
+            compliance_rules_path=compliance_rules_path,
+            explainer_moe_debug=explainer_moe_debug,
         )
         return explainer.explain_top_k(user_snapshot, k=k)
 
@@ -806,24 +1344,34 @@ class ThinFilerRecommender:
         model_scores_by_k = {int(k): [] for k in ks}
         candidate_sizes: List[int] = []
         avg_rel_at_k = {int(k): [] for k in ks}
+        primary_k = int(ks[0])
+        recommended_item_counts: Dict[str, int] = {}
 
         for _, row in eval_snapshots.iterrows():
             candidates = self.generate_candidates(row)
             pair = self._add_pair_features(pd.DataFrame([row]), candidates)
             labels = self._build_labels(pair).to_numpy(dtype=float)
             baseline = pair["baseline_score"].to_numpy(dtype=float)
-            if self.model is not None and self.feature_columns:
-                model = self.model.predict(pair[self.feature_columns].fillna(0.0))
-            else:
-                model = baseline
+            model, _ = self.score_pairs(row, pair)
 
             candidate_sizes.append(int(len(pair)))
             for k in ks:
                 k_int = int(k)
                 baseline_scores_by_k[k_int].append(_ndcg_at_k(labels, baseline, k_int))
-                model_scores_by_k[k_int].append(_ndcg_at_k(labels, model, k_int))
-                order = np.argsort(-model)[:k_int]
-                avg_rel_at_k[k_int].append(float(labels[order].mean()) if order.size > 0 else 0.0)
+                ranked = pair.copy()
+                ranked["score"] = model
+                ranked = ranked.sort_values("score", ascending=False)
+                ranked = self._diversify_ranked_topk(ranked, k=k_int)
+
+                id_to_label = dict(zip(pair["product_id"].astype(str), labels))
+                rec_labels = ranked["product_id"].astype(str).map(id_to_label).fillna(0.0).to_numpy(dtype=float)
+                rec_scores = np.arange(len(rec_labels), 0, -1, dtype=float)
+                model_scores_by_k[k_int].append(_ndcg_at_k(rec_labels, rec_scores, k_int))
+                avg_rel_at_k[k_int].append(float(rec_labels.mean()) if rec_labels.size > 0 else 0.0)
+
+                if k_int == primary_k:
+                    for item_id in ranked["product_id"].astype(str).tolist():
+                        recommended_item_counts[item_id] = recommended_item_counts.get(item_id, 0) + 1
 
         metrics = {
             f"baseline_ndcg@{k}": float(np.mean(v)) if v else 0.0
@@ -838,6 +1386,11 @@ class ThinFilerRecommender:
                 for k, v in avg_rel_at_k.items()
             }
         )
+        if recommended_item_counts:
+            counts = np.array(list(recommended_item_counts.values()), dtype=float)
+            metrics[f"item_gini_index@{primary_k}"] = _gini_coefficient(counts)
+        else:
+            metrics[f"item_gini_index@{primary_k}"] = 0.0
         warnings: List[str] = []
         if not self.cb_join_available:
             warnings.append("cb_join_rate below threshold: table 09 contribution is effectively unavailable.")

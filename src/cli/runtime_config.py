@@ -17,10 +17,14 @@ def load_config(path: Path) -> Dict[str, Any]:
 def _coerce_value(action: argparse.Action, value: Any) -> Any:
     if value is None:
         return value
-    if action.nargs in {"+", "*"} and isinstance(value, list):
-        if action.type is None:
-            return value
-        return [action.type(v) for v in value]
+    if isinstance(value, list):
+        expects_list = action.nargs in {"+", "*"} or isinstance(action.nargs, int)
+        if expects_list:
+            if action.type is None:
+                return value
+            return [action.type(v) for v in value]
+        if len(value) == 1:
+            value = value[0]
     if action.type is not None and not isinstance(value, bool):
         return action.type(value)
     return value

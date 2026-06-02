@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
@@ -26,6 +27,61 @@ try:
     from lightgbm import LGBMRanker
 except Exception:
     LGBMRanker = None
+
+FIT_CORE_TERMS = [
+    "risk_match",
+    "liquidity_match",
+    "horizon_match",
+    "complexity_match",
+    "amount_feasibility",
+]
+DEP_REAL_TERMS = [
+    "amount_feasibility",
+    "digital_match",
+    "complexity_simplicity(=1-complexity/2)",
+    "liquidity_match",
+]
+FUND_REAL_TERMS = [
+    "risk_match",
+    "family_match",
+    "horizon_match",
+    "amount_feasibility",
+]
+HYBRID_TERMS = [
+    "fit_core",
+    "item_utility_prior",
+    "realizability",
+    "rate_factor",
+]
+DEP_LABEL_TERMS = [
+    "item_utility_prior",
+    "rate_norm",
+    "amount_feasibility",
+    "complexity_simplicity",
+    "liquidity_match",
+]
+FUND_LABEL_TERMS = [
+    "item_utility_prior",
+    "risk_adj_norm",
+    "family_match",
+    "horizon_match",
+    "digital_match",
+]
+DEP_ITEM_UTILITY_TERMS = ["U_rate", "U_bonus", "U_feasibility", "U_liquidity"]
+FUND_ITEM_UTILITY_TERMS = ["U_return", "U_risk_eff", "U_cost_eff", "U_liquidity", "U_simplicity"]
+UTILITY_FOCUS_FEATURES = [
+    "hybrid_utility_score",
+    "item_utility_prior",
+    "realizability",
+    "rate_factor",
+    "risk_match",
+    "liquidity_match",
+    "horizon_match",
+    "complexity_match",
+    "amount_feasibility",
+    "family_match",
+    "digital_match",
+]
 
 
 def set_korean_font() -> str:
@@ -48,7 +104,79 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--candidate-max", type=int, default=120)
     p.add_argument("--out-dir", type=Path, default=Path("reports/improved_recommender"))
     p.add_argument("--out-json", type=Path, default=Path("reports/raw/improved_recommender_report.json"))
+    p.add_argument("--fit-core-weights", nargs=5, type=float, default=[0.30, 0.25, 0.20, 0.15, 0.10])
+    p.add_argument("--dep-real-weights", nargs=4, type=float, default=[0.45, 0.25, 0.20, 0.10])
+    p.add_argument("--fund-real-weights", nargs=4, type=float, default=[0.40, 0.30, 0.20, 0.10])
+    p.add_argument("--hybrid-weights", nargs=4, type=float, default=[0.40, 0.35, 0.20, 0.05])
+    p.add_argument("--dep-label-weights", nargs=5, type=float, default=[0.35, 0.20, 0.20, 0.15, 0.10])
+    p.add_argument("--fund-label-weights", nargs=5, type=float, default=[0.35, 0.25, 0.15, 0.15, 0.10])
+    p.add_argument("--dep-item-weights", nargs=4, type=float, default=[0.45, 0.25, 0.20, 0.10])
+    p.add_argument("--fund-item-weights", nargs=5, type=float, default=[0.35, 0.25, 0.20, 0.10, 0.10])
+    p.add_argument("--fund-low-risk-penalty", type=float, default=0.10)
+    p.add_argument("--fund-gate-risk-min", type=float, default=0.35)
+    p.add_argument("--fund-gate-family-min", type=float, default=0.50)
+    p.add_argument("--normalize-utility-weights", action="store_true")
+    p.add_argument("--tune-trials", type=int, default=0, help="Random search trials for utility weights (0 disables tuning)")
+    p.add_argument("--tune-seed", type=int, default=42)
+    p.add_argument("--tune-k", type=int, default=5)
+    p.add_argument("--tune-out-csv", type=Path, default=Path("reports/raw/utility_tuning_trials.csv"))
+    p.add_argument("--tune-item-only", action="store_true", help="Tune only item utility weights; keep pair-layer utility params fixed")
     return parse_args_with_config(p, section="improve_recommender_with_utility")
+
+
+@dataclass
+class UtilityParams:
+    fit_core_weights: List[float]
+    dep_real_weights: List[float]
+    fund_real_weights: List[float]
+    hybrid_weights: List[float]
+    dep_label_weights: List[float]
+    fund_label_weights: List[float]
+    dep_item_weights: List[float]
+    fund_item_weights: List[float]
+    fund_low_risk_penalty: float
+    fund_gate_risk_min: float
+    fund_gate_family_min: float
+    normalized: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _normalize_nonneg_weights(weights: Sequence[float]) -> List[float]:
+    arr = np.asarray([max(0.0, float(v)) for v in weights], dtype=float)
+    s = float(arr.sum())
+    if s <= 0:
+        return [1.0 / len(arr)] * len(arr)
+    return (arr / s).tolist()
+
+
+def build_utility_params(args: argparse.Namespace) -> UtilityParams:
+    params = UtilityParams(
+        fit_core_weights=[float(x) for x in args.fit_core_weights],
+        dep_real_weights=[float(x) for x in args.dep_real_weights],
+        fund_real_weights=[float(x) for x in args.fund_real_weights],
+        hybrid_weights=[float(x) for x in args.hybrid_weights],
+        dep_label_weights=[float(x) for x in args.dep_label_weights],
+        fund_label_weights=[float(x) for x in args.fund_label_weights],
+        dep_item_weights=[float(x) for x in args.dep_item_weights],
+        fund_item_weights=[float(x) for x in args.fund_item_weights],
+        fund_low_risk_penalty=float(args.fund_low_risk_penalty),
+        fund_gate_risk_min=float(args.fund_gate_risk_min),
+        fund_gate_family_min=float(args.fund_gate_family_min),
+        normalized=False,
+    )
+    if args.normalize_utility_weights:
+        params.fit_core_weights = _normalize_nonneg_weights(params.fit_core_weights)
+        params.dep_real_weights = _normalize_nonneg_weights(params.dep_real_weights)
+        params.fund_real_weights = _normalize_nonneg_weights(params.fund_real_weights)
+        params.hybrid_weights = _normalize_nonneg_weights(params.hybrid_weights)
+        params.dep_label_weights = _normalize_nonneg_weights(params.dep_label_weights)
+        params.fund_label_weights = _normalize_nonneg_weights(params.fund_label_weights)
+        params.dep_item_weights = _normalize_nonneg_weights(params.dep_item_weights)
+        params.fund_item_weights = _normalize_nonneg_weights(params.fund_item_weights)
+        params.normalized = True
+    return params
 
 
 def split_users(snapshots: pd.DataFrame, user_col: str, train_ratio: float = 0.8) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -84,29 +212,34 @@ def clip01(s: pd.Series) -> pd.Series:
     return s.fillna(0.0).clip(0.0, 1.0)
 
 
-def add_hybrid_features(pair: pd.DataFrame) -> pd.DataFrame:
+def add_hybrid_features(pair: pd.DataFrame, params: UtilityParams) -> pd.DataFrame:
     pair = pair.copy()
+    w_fit = params.fit_core_weights
+    w_dep_real = params.dep_real_weights
+    w_fund_real = params.fund_real_weights
+    w_hybrid = params.hybrid_weights
+
     # fitness from pair matches
     fit_core = (
-        0.30 * pair["risk_match"]
-        + 0.25 * pair["liquidity_match"]
-        + 0.20 * pair["horizon_match"]
-        + 0.15 * pair["complexity_match"]
-        + 0.10 * pair["amount_feasibility"]
+        w_fit[0] * pair["risk_match"]
+        + w_fit[1] * pair["liquidity_match"]
+        + w_fit[2] * pair["horizon_match"]
+        + w_fit[3] * pair["complexity_match"]
+        + w_fit[4] * pair["amount_feasibility"]
     )
 
     # realizability: deposit/fund rules differ
     dep_real = clip01(
-        0.45 * pair["amount_feasibility"]
-        + 0.25 * pair["digital_match"]
-        + 0.20 * (1.0 - pair["complexity"] / 2.0)
-        + 0.10 * pair["liquidity_match"]
+        w_dep_real[0] * pair["amount_feasibility"]
+        + w_dep_real[1] * pair["digital_match"]
+        + w_dep_real[2] * (1.0 - pair["complexity"] / 2.0)
+        + w_dep_real[3] * pair["liquidity_match"]
     )
     fund_real = clip01(
-        0.40 * pair["risk_match"]
-        + 0.30 * pair["family_match"]
-        + 0.20 * pair["horizon_match"]
-        + 0.10 * pair["amount_feasibility"]
+        w_fund_real[0] * pair["risk_match"]
+        + w_fund_real[1] * pair["family_match"]
+        + w_fund_real[2] * pair["horizon_match"]
+        + w_fund_real[3] * pair["amount_feasibility"]
     )
     pair["realizability"] = np.where(pair["product_family"].eq("deposit"), dep_real, fund_real)
 
@@ -118,10 +251,10 @@ def add_hybrid_features(pair: pd.DataFrame) -> pd.DataFrame:
     pair["rate_factor"] = clip01(maxr / max(denom, 1e-6))
 
     pair["hybrid_utility_score"] = clip01(
-        0.40 * fit_core
-        + 0.35 * pair["item_utility_prior"]
-        + 0.20 * pair["realizability"]
-        + 0.05 * pair["rate_factor"]
+        w_hybrid[0] * fit_core
+        + w_hybrid[1] * pair["item_utility_prior"]
+        + w_hybrid[2] * pair["realizability"]
+        + w_hybrid[3] * pair["rate_factor"]
     )
 
     return pair
@@ -136,7 +269,7 @@ def build_labels_from_hybrid(pair: pd.DataFrame) -> pd.Series:
     return pd.Series(y, index=pair.index, dtype="int64")
 
 
-def build_proxy_label_independent(pair: pd.DataFrame) -> pd.Series:
+def build_proxy_label_independent(pair: pd.DataFrame, params: UtilityParams) -> pd.Series:
     pair = pair.copy()
     rate = pd.to_numeric(pair.get("max_rate", 0), errors="coerce").fillna(0.0)
     rmin, rmax = float(rate.min()), float(rate.max())
@@ -159,20 +292,22 @@ def build_proxy_label_independent(pair: pd.DataFrame) -> pd.Series:
         & (pd.to_numeric(pair.get("principal_variation", 0), errors="coerce").fillna(0) > 0)
     ).astype(float)
 
+    w_dep = params.dep_label_weights
+    w_fund = params.fund_label_weights
     dep_score = (
-        0.35 * item
-        + 0.20 * rate_norm
-        + 0.20 * feas
-        + 0.15 * complexity
-        + 0.10 * liquidity
+        w_dep[0] * item
+        + w_dep[1] * rate_norm
+        + w_dep[2] * feas
+        + w_dep[3] * complexity
+        + w_dep[4] * liquidity
     )
     fund_score = (
-        0.35 * item
-        + 0.25 * risk_adj_norm
-        + 0.15 * family
-        + 0.15 * horizon
-        + 0.10 * digital
-        - 0.10 * low_risk_penalty
+        w_fund[0] * item
+        + w_fund[1] * risk_adj_norm
+        + w_fund[2] * family
+        + w_fund[3] * horizon
+        + w_fund[4] * digital
+        - params.fund_low_risk_penalty * low_risk_penalty
     )
     is_deposit = pair["product_family"].eq("deposit")
     score = np.where(is_deposit, dep_score, fund_score)
@@ -182,7 +317,7 @@ def build_proxy_label_independent(pair: pd.DataFrame) -> pd.Series:
     # - deposit: keep strict amount feasibility gate
     # - fund: do not collapse by amount_feasibility (often non-informative for funds)
     #         use risk compatibility + family consistency as realizability gate.
-    fund_gate = ((risk_match >= 0.35) & (family >= 0.5)).astype(float)
+    fund_gate = ((risk_match >= params.fund_gate_risk_min) & (family >= params.fund_gate_family_min)).astype(float)
     gate = np.where(is_deposit, (feas > 0).astype(float), fund_gate)
     score = score.where(gate > 0, 0.0)
 
@@ -195,6 +330,36 @@ def build_proxy_label_independent(pair: pd.DataFrame) -> pd.Series:
     y = np.select([score >= q80, score >= q55, score >= q30], [3, 2, 1], default=0)
     y = np.where(gate <= 0, 0, y)
     return pd.Series(y, index=pair.index, dtype="int64")
+
+
+def apply_item_utility_prior(pair: pd.DataFrame, params: UtilityParams) -> pd.DataFrame:
+    pair = pair.copy()
+    is_deposit = pair["product_family"].eq("deposit")
+
+    dep_parts = []
+    for col in DEP_ITEM_UTILITY_TERMS:
+        dep_parts.append(pd.to_numeric(pair.get(col, 0.0), errors="coerce").fillna(0.0))
+    dep_prior = (
+        params.dep_item_weights[0] * dep_parts[0]
+        + params.dep_item_weights[1] * dep_parts[1]
+        + params.dep_item_weights[2] * dep_parts[2]
+        + params.dep_item_weights[3] * dep_parts[3]
+    )
+
+    fund_parts = []
+    for col in FUND_ITEM_UTILITY_TERMS:
+        fund_parts.append(pd.to_numeric(pair.get(col, 0.0), errors="coerce").fillna(0.0))
+    fund_prior = (
+        params.fund_item_weights[0] * fund_parts[0]
+        + params.fund_item_weights[1] * fund_parts[1]
+        + params.fund_item_weights[2] * fund_parts[2]
+        + params.fund_item_weights[3] * fund_parts[3]
+        + params.fund_item_weights[4] * fund_parts[4]
+    )
+
+    prior = np.where(is_deposit, dep_prior, fund_prior)
+    pair["item_utility_prior"] = clip01(pd.Series(prior, index=pair.index))
+    return pair
 
 
 def summarize_label_diagnostics(train_data: pd.DataFrame, eval_data: pd.DataFrame) -> Dict[str, object]:
@@ -227,20 +392,50 @@ def summarize_label_diagnostics(train_data: pd.DataFrame, eval_data: pd.DataFram
     return diag
 
 
-def candidate_pair_for_user(rec: ThinFilerRecommender, user_row: pd.Series, priors: pd.DataFrame, candidate_max: int) -> pd.DataFrame:
-    cands = rec.generate_candidates(user_row, max_candidates=candidate_max)
-    pair = rec._add_pair_features(pd.DataFrame([user_row]), cands)
-    pair["product_id"] = pair["product_id"].astype(str)
-    pair = pair.merge(priors[["product_id", "item_utility_prior"]], on="product_id", how="left")
-    pair = add_hybrid_features(pair)
+def apply_utility_features_and_labels(
+    pair: pd.DataFrame,
+    rec: ThinFilerRecommender,
+    params: UtilityParams,
+) -> pd.DataFrame:
+    pair = apply_item_utility_prior(pair, params)
+    pair = add_hybrid_features(pair, params)
     pair["hybrid_label"] = build_labels_from_hybrid(pair)
-    pair["proxy_label"] = rec._build_labels(pair)
-    pair["ind_proxy_label"] = build_proxy_label_independent(pair)
+    pair["ind_proxy_label"] = build_proxy_label_independent(pair, params)
     pair["label"] = pair["ind_proxy_label"].astype("int64")
+    if "proxy_label" not in pair.columns:
+        pair["proxy_label"] = rec._build_labels(pair)
     return pair
 
 
-def build_dataset(rec: ThinFilerRecommender, snapshots: pd.DataFrame, priors: pd.DataFrame, candidate_max: int, max_users: int) -> Tuple[pd.DataFrame, List[int]]:
+def candidate_pair_for_user_base(rec: ThinFilerRecommender, user_row: pd.Series, priors: pd.DataFrame, candidate_max: int) -> pd.DataFrame:
+    cands = rec.generate_candidates(user_row, max_candidates=candidate_max)
+    pair = rec._add_pair_features(pd.DataFrame([user_row]), cands)
+    pair["product_id"] = pair["product_id"].astype(str)
+    prior_cols = [
+        "product_id",
+        "item_utility_prior",
+        "U_rate",
+        "U_bonus",
+        "U_feasibility",
+        "U_liquidity",
+        "U_return",
+        "U_risk_eff",
+        "U_cost_eff",
+        "U_simplicity",
+    ]
+    prior_cols = [c for c in prior_cols if c in priors.columns]
+    pair = pair.merge(priors[prior_cols], on="product_id", how="left")
+    pair["proxy_label"] = rec._build_labels(pair)
+    return pair
+
+
+def build_base_dataset(
+    rec: ThinFilerRecommender,
+    snapshots: pd.DataFrame,
+    priors: pd.DataFrame,
+    candidate_max: int,
+    max_users: int,
+) -> Tuple[pd.DataFrame, List[int]]:
     users = snapshots[rec.config.user_key_11].drop_duplicates()
     if len(users) > max_users:
         keep = users.sample(n=max_users, random_state=42)
@@ -249,12 +444,120 @@ def build_dataset(rec: ThinFilerRecommender, snapshots: pd.DataFrame, priors: pd
     groups: List[int] = []
     rows: List[pd.DataFrame] = []
     for _, user_row in snapshots.iterrows():
-        pair = candidate_pair_for_user(rec, user_row, priors, candidate_max)
+        pair = candidate_pair_for_user_base(rec, user_row, priors, candidate_max)
         rows.append(pair)
         groups.append(len(pair))
 
     data = pd.concat(rows, ignore_index=True)
     return data, groups
+
+
+def _ndcg_metric(data: pd.DataFrame, label_col: str, score_col: str, k: int) -> float:
+    scores: List[float] = []
+    for _, g in data.groupby("query_id"):
+        y = g[label_col].to_numpy(dtype=float)
+        s = g[score_col].to_numpy(dtype=float)
+        scores.append(_ndcg_at_k(y, s, int(k)))
+    return float(np.mean(scores)) if scores else 0.0
+
+
+def _dirichlet_around(base_weights: Sequence[float], rng: np.random.Generator, concentration: float = 24.0) -> List[float]:
+    base = np.asarray([max(1e-6, float(x)) for x in base_weights], dtype=float)
+    base = base / base.sum()
+    alpha = np.maximum(base * concentration, 1e-3)
+    return rng.dirichlet(alpha).tolist()
+
+
+def sample_utility_params(base: UtilityParams, rng: np.random.Generator) -> UtilityParams:
+    return UtilityParams(
+        fit_core_weights=_dirichlet_around(base.fit_core_weights, rng),
+        dep_real_weights=_dirichlet_around(base.dep_real_weights, rng),
+        fund_real_weights=_dirichlet_around(base.fund_real_weights, rng),
+        hybrid_weights=_dirichlet_around(base.hybrid_weights, rng),
+        dep_label_weights=_dirichlet_around(base.dep_label_weights, rng),
+        fund_label_weights=_dirichlet_around(base.fund_label_weights, rng),
+        dep_item_weights=_dirichlet_around(base.dep_item_weights, rng),
+        fund_item_weights=_dirichlet_around(base.fund_item_weights, rng),
+        fund_low_risk_penalty=float(rng.uniform(0.03, 0.20)),
+        fund_gate_risk_min=float(rng.uniform(0.20, 0.60)),
+        fund_gate_family_min=float(rng.uniform(0.30, 0.80)),
+        normalized=True,
+    )
+
+
+def sample_item_utility_only_params(base: UtilityParams, rng: np.random.Generator) -> UtilityParams:
+    return UtilityParams(
+        fit_core_weights=list(base.fit_core_weights),
+        dep_real_weights=list(base.dep_real_weights),
+        fund_real_weights=list(base.fund_real_weights),
+        hybrid_weights=list(base.hybrid_weights),
+        dep_label_weights=list(base.dep_label_weights),
+        fund_label_weights=list(base.fund_label_weights),
+        dep_item_weights=_dirichlet_around(base.dep_item_weights, rng),
+        fund_item_weights=_dirichlet_around(base.fund_item_weights, rng),
+        fund_low_risk_penalty=float(base.fund_low_risk_penalty),
+        fund_gate_risk_min=float(base.fund_gate_risk_min),
+        fund_gate_family_min=float(base.fund_gate_family_min),
+        normalized=True,
+    )
+
+
+def tune_utility_params(
+    rec: ThinFilerRecommender,
+    eval_base: pd.DataFrame,
+    base_params: UtilityParams,
+    tune_trials: int,
+    tune_seed: int,
+    tune_k: int,
+    tune_item_only: bool = False,
+) -> Tuple[UtilityParams, pd.DataFrame]:
+    rng = np.random.default_rng(tune_seed)
+    trials: List[Dict[str, Any]] = []
+    best_params = base_params
+    best_score = -1.0
+
+    for trial_idx in range(tune_trials + 1):
+        if trial_idx == 0:
+            params = base_params
+            trial_name = "baseline"
+        else:
+            params = sample_item_utility_only_params(base_params, rng) if tune_item_only else sample_utility_params(base_params, rng)
+            trial_name = f"trial_{trial_idx}"
+
+        eval_data = apply_utility_features_and_labels(eval_base.copy(), rec, params)
+        score_proxy = _ndcg_metric(eval_data, "proxy_label", "hybrid_utility_score", k=tune_k)
+        score_ind = _ndcg_metric(eval_data, "ind_proxy_label", "hybrid_utility_score", k=tune_k)
+        objective = 0.7 * score_proxy + 0.3 * score_ind
+
+        row: Dict[str, Any] = {
+            "trial": trial_name,
+            "objective": float(objective),
+            "hybrid_vs_proxy_ndcg": float(score_proxy),
+            "hybrid_vs_ind_proxy_ndcg": float(score_ind),
+            "fund_low_risk_penalty": float(params.fund_low_risk_penalty),
+            "fund_gate_risk_min": float(params.fund_gate_risk_min),
+            "fund_gate_family_min": float(params.fund_gate_family_min),
+            "dep_item_weights": json.dumps(params.dep_item_weights, ensure_ascii=False),
+            "fund_item_weights": json.dumps(params.fund_item_weights, ensure_ascii=False),
+            "fit_core_weights": json.dumps(params.fit_core_weights, ensure_ascii=False),
+            "dep_real_weights": json.dumps(params.dep_real_weights, ensure_ascii=False),
+            "fund_real_weights": json.dumps(params.fund_real_weights, ensure_ascii=False),
+            "hybrid_weights": json.dumps(params.hybrid_weights, ensure_ascii=False),
+            "dep_label_weights": json.dumps(params.dep_label_weights, ensure_ascii=False),
+            "fund_label_weights": json.dumps(params.fund_label_weights, ensure_ascii=False),
+        }
+        trials.append(row)
+        if objective > best_score:
+            best_score = objective
+            best_params = params
+
+    trial_df = pd.DataFrame(trials).sort_values("objective", ascending=False).reset_index(drop=True)
+    return best_params, trial_df
+
+
+def _weighted_formula(weights: Sequence[float], terms: Sequence[str]) -> str:
+    parts = [f"{float(w):.4f}*{t}" for w, t in zip(weights, terms)]
+    return " + ".join(parts)
 
 
 def eval_methods(data: pd.DataFrame, ks: Sequence[int], label_col: str) -> Dict[str, float]:
@@ -322,11 +625,35 @@ def plot_feature_importance(model: LGBMRanker, feature_cols: List[str], out_path
     plt.close(fig)
 
 
+def plot_utility_feature_importance(model: LGBMRanker, feature_cols: List[str], out_path: Path) -> pd.DataFrame:
+    imp = pd.DataFrame({"feature": feature_cols, "importance": model.feature_importances_})
+    uimp = imp[imp["feature"].isin(UTILITY_FOCUS_FEATURES)].copy()
+    if uimp.empty:
+        return uimp
+    uimp = uimp.sort_values("importance", ascending=False)
+    total = float(uimp["importance"].sum())
+    uimp["importance_share"] = np.where(total > 0, uimp["importance"] / total, 0.0)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    sns.barplot(data=uimp, x="importance_share", y="feature", color="#1F77B4", ax=ax)
+    ax.set_title("Utility 관련 Pair-Feature Importance 비중")
+    ax.set_xlabel("share within utility-focused features")
+    ax.set_ylabel("feature")
+    for i, r in uimp.reset_index(drop=True).iterrows():
+        ax.text(r["importance_share"] + 0.005, i, f"{r['importance_share']:.3f}", va="center", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    return uimp
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
+    args.tune_out_csv.parent.mkdir(parents=True, exist_ok=True)
     font_name = set_korean_font()
+    utility_params = build_utility_params(args)
 
     cfg = RecommenderConfig(data_root=args.data_root, recommender_family=args.family)
     rec = ThinFilerRecommender(cfg)
@@ -342,14 +669,30 @@ def main() -> None:
 
     train_snap, eval_snap = split_users(snapshots, cfg.user_key_11, train_ratio=0.8)
 
-    train_data, train_group = build_dataset(rec, train_snap, priors, args.candidate_max, args.max_train_users)
-    eval_data, _ = build_dataset(rec, eval_snap, priors, args.candidate_max, args.max_eval_users)
+    train_base, train_group = build_base_dataset(rec, train_snap, priors, args.candidate_max, args.max_train_users)
+    eval_base, _ = build_base_dataset(rec, eval_snap, priors, args.candidate_max, args.max_eval_users)
 
     # query ids for grouped evaluation
-    train_data = train_data.reset_index(drop=True)
-    eval_data = eval_data.reset_index(drop=True)
-    train_data["query_id"] = train_data[cfg.user_key_11].astype(str) + "::" + train_data["as_of_date"].astype(str)
-    eval_data["query_id"] = eval_data[cfg.user_key_11].astype(str) + "::" + eval_data["as_of_date"].astype(str)
+    train_base = train_base.reset_index(drop=True)
+    eval_base = eval_base.reset_index(drop=True)
+    train_base["query_id"] = train_base[cfg.user_key_11].astype(str) + "::" + train_base["as_of_date"].astype(str)
+    eval_base["query_id"] = eval_base[cfg.user_key_11].astype(str) + "::" + eval_base["as_of_date"].astype(str)
+
+    tuning_trials_df: pd.DataFrame | None = None
+    if args.tune_trials > 0:
+        utility_params, tuning_trials_df = tune_utility_params(
+            rec=rec,
+            eval_base=eval_base,
+            base_params=utility_params,
+            tune_trials=int(args.tune_trials),
+            tune_seed=int(args.tune_seed),
+            tune_k=int(args.tune_k),
+            tune_item_only=bool(args.tune_item_only),
+        )
+        tuning_trials_df.to_csv(args.tune_out_csv, index=False, encoding="utf-8-sig")
+
+    train_data = apply_utility_features_and_labels(train_base.copy(), rec, utility_params)
+    eval_data = apply_utility_features_and_labels(eval_base.copy(), rec, utility_params)
 
     feature_cols = [
         "risk_match", "liquidity_match", "horizon_match", "complexity_match", "amount_feasibility",
@@ -391,6 +734,7 @@ def main() -> None:
     plot_metric_bars(metrics_proxy_label, args.ks, args.out_dir / "01_ndcg_comparison.png")
     plot_score_distributions(eval_data, args.out_dir / "02_score_distribution.png")
     plot_feature_importance(model, feature_cols, args.out_dir / "03_feature_importance.png")
+    utility_imp_df = plot_utility_feature_importance(model, feature_cols, args.out_dir / "05_utility_feature_importance.png")
 
     # top recommendation diversity check
     tops: List[pd.DataFrame] = []
@@ -413,6 +757,15 @@ def main() -> None:
     summary = {
         "font": font_name,
         "family": args.family,
+        "utility_params": utility_params.to_dict(),
+        "utility_tuning": {
+            "enabled": bool(args.tune_trials > 0),
+            "trials": int(args.tune_trials),
+            "seed": int(args.tune_seed),
+            "k": int(args.tune_k),
+            "out_csv": str(args.tune_out_csv),
+            "tune_item_only": bool(args.tune_item_only),
+        },
         "snapshot_quality": rec.snapshot_quality_report(snapshots),
         "data": {
             "sample_users_arg": args.sample_users,
@@ -428,6 +781,24 @@ def main() -> None:
         "metrics_hybrid_label": metrics_hybrid_label,
         "label_diagnostics": diagnostics,
         "top5_family_mix": {k: float(v) for k, v in fam.to_dict().items()},
+        "formulae": {
+            "item_utility_deposit": _weighted_formula(utility_params.dep_item_weights, DEP_ITEM_UTILITY_TERMS),
+            "item_utility_fund": _weighted_formula(utility_params.fund_item_weights, FUND_ITEM_UTILITY_TERMS),
+            "fit_core": _weighted_formula(utility_params.fit_core_weights, FIT_CORE_TERMS),
+            "realizability_deposit": _weighted_formula(utility_params.dep_real_weights, DEP_REAL_TERMS),
+            "realizability_fund": _weighted_formula(utility_params.fund_real_weights, FUND_REAL_TERMS),
+            "hybrid_utility_score": _weighted_formula(utility_params.hybrid_weights, HYBRID_TERMS),
+            "ind_proxy_label_deposit_score": _weighted_formula(utility_params.dep_label_weights, DEP_LABEL_TERMS),
+            "ind_proxy_label_fund_score": _weighted_formula(utility_params.fund_label_weights, FUND_LABEL_TERMS)
+            + f" - {utility_params.fund_low_risk_penalty:.4f}*low_risk_penalty",
+        },
+        "tuning_method": {
+            "search": "random search around baseline via Dirichlet sampling",
+            "dirichlet_concentration": 24.0,
+            "objective": "0.7*NDCG(hybrid_utility_score, proxy_label) + 0.3*NDCG(hybrid_utility_score, ind_proxy_label)",
+            "selection": "best objective on held-out eval queries",
+            "scope": "item utility only" if args.tune_item_only else "item + pair utility params",
+        },
         "notes": [
             "Applied split utility priors: deposit_utility for deposits, fund_utility for funds.",
             "Added pair-level realizability to prevent over-rewarding hard-to-achieve products.",
@@ -435,6 +806,11 @@ def main() -> None:
             "Primary metric for model fit is ind_proxy_label on held-out users; proxy/hybrid metrics are auxiliary and may be circular.",
         ],
     }
+    if not utility_imp_df.empty:
+        summary["utility_feature_importance"] = utility_imp_df.to_dict(orient="records")
+    if tuning_trials_df is not None and not tuning_trials_df.empty:
+        summary["utility_tuning"]["best_objective"] = float(tuning_trials_df.iloc[0]["objective"])
+        summary["utility_tuning"]["best_trial"] = str(tuning_trials_df.iloc[0]["trial"])
 
     warnings: List[str] = []
     fund_dist = diagnostics.get("fund_eval_ind_proxy_label_dist", {})
@@ -469,6 +845,54 @@ def main() -> None:
         f"- train queries: {summary['data']['train_queries']:,}",
         f"- eval queries: {summary['data']['eval_queries']:,}",
         f"- feature count: {summary['data']['feature_count']}",
+        "",
+        "## Utility 파라미터",
+        f"- fit_core_weights: {utility_params.fit_core_weights}",
+        f"- dep_real_weights: {utility_params.dep_real_weights}",
+        f"- fund_real_weights: {utility_params.fund_real_weights}",
+        f"- hybrid_weights: {utility_params.hybrid_weights}",
+        f"- dep_label_weights: {utility_params.dep_label_weights}",
+        f"- fund_label_weights: {utility_params.fund_label_weights}",
+        f"- dep_item_weights: {utility_params.dep_item_weights}",
+        f"- fund_item_weights: {utility_params.fund_item_weights}",
+        f"- fund_low_risk_penalty: {utility_params.fund_low_risk_penalty:.4f}",
+        f"- fund_gate_risk_min: {utility_params.fund_gate_risk_min:.4f}",
+        f"- fund_gate_family_min: {utility_params.fund_gate_family_min:.4f}",
+        "",
+        "## Utility 튜닝",
+        f"- enabled: {bool(args.tune_trials > 0)}",
+        f"- trials: {int(args.tune_trials)}",
+        f"- tune_k: {int(args.tune_k)}",
+        f"- tune_item_only: {bool(args.tune_item_only)}",
+    ]
+    if tuning_trials_df is not None and not tuning_trials_df.empty:
+        report_lines.append(f"- best objective: {float(tuning_trials_df.iloc[0]['objective']):.4f}")
+        report_lines.append(f"- best trial: {str(tuning_trials_df.iloc[0]['trial'])}")
+    report_lines += [
+        "",
+        "## 식 정의 (현재 반영값)",
+        f"- item_utility (deposit) = {summary['formulae']['item_utility_deposit']}",
+        f"- item_utility (fund) = {summary['formulae']['item_utility_fund']}",
+        f"- fit_core = {summary['formulae']['fit_core']}",
+        f"- realizability (deposit) = {summary['formulae']['realizability_deposit']}",
+        f"- realizability (fund) = {summary['formulae']['realizability_fund']}",
+        f"- hybrid_utility_score = {summary['formulae']['hybrid_utility_score']}",
+        f"- ind_proxy_label score (deposit) = {summary['formulae']['ind_proxy_label_deposit_score']}",
+        f"- ind_proxy_label score (fund) = {summary['formulae']['ind_proxy_label_fund_score']}",
+        "",
+        "## 식 의미",
+        "- fit_core: 사용자-상품 기본 적합도(위험/유동성/기간/복잡도/금액충족) 요약값",
+        "- realizability: '이론상 좋음'이 아니라 실제 가입/달성 가능성을 반영한 보정값",
+        "- item_utility_prior: 상품 자체의 사전 utility 인덱스(수신/펀드 분리 계산, 본 튜닝의 핵심 대상)",
+        "- rate_factor: 금리 매력도를 약한 tie-breaker로 반영(과대영향 방지)",
+        "- hybrid_utility_score: 적합도 + 상품사전점수 + 실현가능성 + 금리요인 결합 점수",
+        "- ind_proxy_label: 학습용 약라벨(독립 규칙)로 쿼리 내 상대 순위를 0/1/2/3으로 변환",
+        "",
+        "## 튜닝 방법",
+        "- baseline 가중치 주변을 Dirichlet 샘플링으로 랜덤 탐색",
+        "- 탐색 단위: 가중치 세트 1개당 전체 eval query에서 NDCG 계산",
+        "- 목적함수: 0.7*NDCG(hybrid, proxy_label) + 0.3*NDCG(hybrid, ind_proxy_label)",
+        "- 최적 선택: 목적함수 최대 trial 채택",
         "",
         "## 성능 (NDCG)",
     ]
@@ -513,6 +937,13 @@ def main() -> None:
 
     report_lines += [
         "",
+        "## Utility Feature Importance",
+    ]
+    if "utility_feature_importance" in summary:
+        for r in summary["utility_feature_importance"][:8]:
+            report_lines.append(f"- {r['feature']}: share={float(r['importance_share']):.4f}")
+    report_lines += [
+        "",
         "## Top-5 상품군 비중",
     ]
     for fam_name, ratio in summary["top5_family_mix"].items():
@@ -526,7 +957,10 @@ def main() -> None:
         f"- figure: `{args.out_dir / '02_score_distribution.png'}`",
         f"- figure: `{args.out_dir / '03_feature_importance.png'}`",
         f"- figure: `{args.out_dir / '04_top5_family_mix.png'}`",
+        f"- figure: `{args.out_dir / '05_utility_feature_importance.png'}`",
     ]
+    if args.tune_trials > 0:
+        report_lines.append(f"- tuning csv: `{args.tune_out_csv}`")
 
     (args.out_dir / "report.md").write_text("\n".join(report_lines), encoding="utf-8")
     print(f"saved report: {args.out_dir / 'report.md'}")

@@ -14,6 +14,7 @@
   -> [Candidate Generation]
   -> [User-Item Pair Features]
   -> [Baseline + LGBMRanker]
+  -> [MoE Harness (optional): gated ranker/baseline/utility experts]
   -> [Top-K Recommendation]
   -> [Reason Extractor]
   -> [Explanation Object]
@@ -34,6 +35,7 @@ src/
 
   recommender/
     engine.py
+    moe_harness.py
 
   explainer/
     service.py

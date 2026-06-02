@@ -52,6 +52,14 @@ def parse_args() -> argparse.Namespace:
         help="Where to apply live LLM rendering: sample only or all profile E2E rows",
     )
     p.add_argument("--no-template-fallback", action="store_true")
+    p.add_argument("--use-explainer-moe", action="store_true")
+    p.add_argument("--explainer-moe-debug", action="store_true")
+    p.add_argument(
+        "--compliance-rules-path",
+        type=Path,
+        default=Path("src/explainer/compliance_rules.txt"),
+        help="Text file path for external compliance rules (금융소비자보호법 문항 등)",
+    )
     return p.parse_args()
 
 
@@ -115,6 +123,9 @@ def run_recommendation_with_details(
     k: int,
     llm_renderer: Optional[OpenAILLMRenderer],
     fallback_to_template_on_verify_fail: bool,
+    use_explainer_moe: bool,
+    compliance_rules_path: Path,
+    explainer_moe_debug: bool,
 ) -> Dict[str, Any]:
     recommend = rec.recommend(user_row, k=k)
     explain = rec.explain_recommendation_with(
@@ -122,6 +133,9 @@ def run_recommendation_with_details(
         k=k,
         llm_renderer=llm_renderer,
         fallback_to_template_on_verify_fail=fallback_to_template_on_verify_fail,
+        use_explainer_moe=use_explainer_moe,
+        compliance_rules_path=compliance_rules_path,
+        explainer_moe_debug=explainer_moe_debug,
     )
     return {"recommend": recommend, "explain": explain}
 
@@ -161,6 +175,9 @@ def build_sample_section(
     top_k: int,
     llm_renderer: Optional[OpenAILLMRenderer],
     fallback_to_template_on_verify_fail: bool,
+    use_explainer_moe: bool,
+    compliance_rules_path: Path,
+    explainer_moe_debug: bool,
 ) -> Dict[str, Any]:
     sample_raw = raw_df.sort_values("tps_score", ascending=False).iloc[0]
     sample_parsed = parsed_df[parsed_df["CUST_ID"].astype(str).eq(str(sample_raw["CUST_ID"]))].iloc[0]
@@ -171,6 +188,9 @@ def build_sample_section(
         k=top_k,
         llm_renderer=llm_renderer,
         fallback_to_template_on_verify_fail=fallback_to_template_on_verify_fail,
+        use_explainer_moe=use_explainer_moe,
+        compliance_rules_path=compliance_rules_path,
+        explainer_moe_debug=explainer_moe_debug,
     )
     topk = summarize_topk_with_product_info(bundle["recommend"], pmap)
 
@@ -191,6 +211,9 @@ def build_profile_e2e_section(
     per_type: int,
     llm_renderer: Optional[OpenAILLMRenderer],
     fallback_to_template_on_verify_fail: bool,
+    use_explainer_moe: bool,
+    compliance_rules_path: Path,
+    explainer_moe_debug: bool,
 ) -> List[Dict[str, Any]]:
     sampled_groups: List[pd.DataFrame] = []
     for user_type, g in raw_df.groupby("user_type"):
@@ -217,6 +240,9 @@ def build_profile_e2e_section(
             k=top_k,
             llm_renderer=llm_renderer,
             fallback_to_template_on_verify_fail=fallback_to_template_on_verify_fail,
+            use_explainer_moe=use_explainer_moe,
+            compliance_rules_path=compliance_rules_path,
+            explainer_moe_debug=explainer_moe_debug,
         )
         rows.append(
             {
@@ -490,6 +516,9 @@ def main() -> None:
         top_k=args.top_k,
         llm_renderer=llm_renderer_sample,
         fallback_to_template_on_verify_fail=not args.no_template_fallback,
+        use_explainer_moe=bool(args.use_explainer_moe),
+        compliance_rules_path=args.compliance_rules_path,
+        explainer_moe_debug=bool(args.explainer_moe_debug),
     )
     (raw_dir / "sample_e2e_payload.json").write_text(
         json.dumps(sample_section, ensure_ascii=False, indent=2),
@@ -506,6 +535,9 @@ def main() -> None:
         per_type=args.profile_llm_per_type,
         llm_renderer=llm_renderer_profile,
         fallback_to_template_on_verify_fail=not args.no_template_fallback,
+        use_explainer_moe=bool(args.use_explainer_moe),
+        compliance_rules_path=args.compliance_rules_path,
+        explainer_moe_debug=bool(args.explainer_moe_debug),
     )
     (raw_dir / "profile_type_e2e_payload.json").write_text(
         json.dumps(profile_rows, ensure_ascii=False, indent=2),
